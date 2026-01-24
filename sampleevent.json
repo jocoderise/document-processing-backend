@@ -1,0 +1,122 @@
+{
+    "level": "DEBUG",
+    "stage": "EVENT",
+    "message": "Incoming API Gateway event",
+    "requestId": "e4c0a5f7-0d88-4137-b254-77b8cb83f5f5",
+    "event": {
+        "resource": "/funds/{fundId}/documents",
+        "path": "/funds/sdsdfsdf/documents",
+        "httpMethod": "POST",
+        "headers": {
+            "accept": "application/json, text/plain, */*",
+            "accept-encoding": "gzip, deflate, br, zstd",
+            "accept-language": "en-US,en;q=0.9",
+            "content-type": "multipart/form-data; boundary=----geckoformboundary6bc7010c570cdb4fc33b1c19fb472e07",
+            "Host": "rjkzz2oxe6.execute-api.us-east-1.amazonaws.com",
+            "origin": "http://localhost:4200",
+            "priority": "u=0",
+            "referer": "http://localhost:4200/",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "cross-site",
+            "sec-gpc": "1",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:147.0) Gecko/20100101 Firefox/147.0",
+            "X-Amzn-Trace-Id": "Root=1-697445fa-28dea2f820e13d7c5a0f3ce6",
+            "X-Forwarded-For": "73.195.185.139",
+            "X-Forwarded-Port": "443",
+            "X-Forwarded-Proto": "https"
+        },
+        "multiValueHeaders": {
+            "accept": [
+                "application/json, text/plain, */*"
+            ],
+            "accept-encoding": [
+                "gzip, deflate, br, zstd"
+            ],
+            "accept-language": [
+                "en-US,en;q=0.9"
+            ],
+            "content-type": [
+                "multipart/form-data; boundary=----geckoformboundary6bc7010c570cdb4fc33b1c19fb472e07"
+            ],
+            "Host": [
+                "rjkzz2oxe6.execute-api.us-east-1.amazonaws.com"
+            ],
+            "origin": [
+                "http://localhost:4200"
+            ],
+            "priority": [
+                "u=0"
+            ],
+            "referer": [
+                "http://localhost:4200/"
+            ],
+            "sec-fetch-dest": [
+                "empty"
+            ],
+            "sec-fetch-mode": [
+                "cors"
+            ],
+            "sec-fetch-site": [
+                "cross-site"
+            ],
+            "sec-gpc": [
+                "1"
+            ],
+            "User-Agent": [
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:147.0) Gecko/20100101 Firefox/147.0"
+            ],
+            "X-Amzn-Trace-Id": [
+                "Root=1-697445fa-28dea2f820e13d7c5a0f3ce6"
+            ],
+            "X-Forwarded-For": [
+                "73.195.185.139"
+            ],
+            "X-Forwarded-Port": [
+                "443"
+            ],
+            "X-Forwarded-Proto": [
+                "https"
+            ]
+        },
+        "queryStringParameters": null,
+        "multiValueQueryStringParameters": null,
+        "pathParameters": {
+            "fundId": "sdsdfsdf"
+        },
+        "stageVariables": null,
+        "requestContext": {
+            "resourceId": "8986zj",
+            "resourcePath": "/funds/{fundId}/documents",
+            "httpMethod": "POST",
+            "extendedRequestId": "Xq_fRGH3oAMECBw=",
+            "requestTime": "24/Jan/2026:04:09:30 +0000",
+            "path": "/dev/funds/sdsdfsdf/documents",
+            "accountId": "293883686626",
+            "protocol": "HTTP/1.1",
+            "stage": "dev",
+            "domainPrefix": "rjkzz2oxe6",
+            "requestTimeEpoch": 1769227770983,
+            "requestId": "5010df06-1832-4f36-89c2-d5c5c68f8946",
+            "identity": {
+                "cognitoIdentityPoolId": null,
+                "accountId": null,
+                "cognitoIdentityId": null,
+                "caller": null,
+                "sourceIp": "73.195.185.139",
+                "principalOrgId": null,
+                "accessKey": null,
+                "cognitoAuthenticationType": null,
+                "cognitoAuthenticationProvider": null,
+                "userArn": null,
+                "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:147.0) Gecko/20100101 Firefox/147.0",
+                "user": null
+            },
+            "domainName": "rjkzz2oxe6.execute-api.us-east-1.amazonaws.com",
+            "deploymentId": "trby8p",
+            "apiId": "rjkzz2oxe6"
+        },
+        "body": "fileBinary",
+        "isBase64Encoded": false
+    }
+}
