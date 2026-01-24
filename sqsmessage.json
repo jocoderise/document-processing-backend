@@ -1,0 +1,9 @@
+{
+    "fundId": "jo-sqstest-123",
+    "inputFiles": [
+        "s3://highcloud-rulesgen/jo-sqstest-123/files/PE_IMA_v2_DIRTY_PageAnchored.pdf",
+        "s3://highcloud-rulesgen/jo-sqstest-123/files/PE_Side_Letter_v2_PageAnchored.pdf"
+    ],
+    "outputPath": "s3://highcloud-rulesgen/jo-sqstest-123/results/",
+    "schemaPath": "s3://highcloud-rulesgen/RulesEngineJSONSchema.txt"
+}
