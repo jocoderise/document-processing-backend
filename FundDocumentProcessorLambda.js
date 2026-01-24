@@ -94,7 +94,11 @@ export const handler = async (event, context) => {
 
   // Load prompt once per invocation (cached on warm starts)
   const prompt = await readS3Text(PROMPT_S3_URI);
-
+  log("INFO", "Prompt loaded", {
+    requestId,
+    promptUri: PROMPT_S3_URI,
+    promptLength: prompt.length
+  });
   for (const record of event.Records || []) {
     const payload = JSON.parse(record.body || "{}");
 
@@ -155,9 +159,7 @@ export const handler = async (event, context) => {
         document: {
           name: d.name,
           format: d.format,
-          source: {
-            s3Location: { uri: d.uri }
-          }
+          source: { s3Location: { uri: d.uri } }
         }
       }));
 
@@ -166,10 +168,7 @@ export const handler = async (event, context) => {
         messages: [
           {
             role: "user",
-            content: [
-              ...documentBlocks,
-              { text: prompt }
-            ]
+            content: [...documentBlocks, { text: prompt }]
           }
         ],
         inferenceConfig: {
@@ -179,7 +178,35 @@ export const handler = async (event, context) => {
         }
       });
 
-      const resp = await bedrock.send(command);
+      const bedrockStart = Date.now();
+
+      let resp;
+      try {
+        log("INFO", "Sending request to Bedrock", {
+          requestId,
+          fundId,
+          batch: i + 1
+        });
+
+        resp = await bedrock.send(command);
+
+      } catch (err) {
+        log("ERROR", "Bedrock invocation failed", {
+          requestId,
+          fundId,
+          batch: i + 1,
+          error: err.message,
+          stack: err.stack
+        });
+        throw err;
+      }
+
+      log("INFO", "Bedrock response received", {
+        requestId,
+        fundId,
+        batch: i + 1,
+        durationMs: Date.now() - bedrockStart
+      });
 
       const text =
         resp?.output?.message?.content
@@ -187,8 +214,17 @@ export const handler = async (event, context) => {
           .map(c => c.text)
           .join("\n\n") || "";
 
+      log("INFO", "Extracted Bedrock text", {
+        requestId,
+        fundId,
+        batch: i + 1,
+        textLength: text.length,
+        preview: text.substring(0, 300)
+      });
+
       outputs.push(text);
     }
+
 
     /* ---------------- MERGE FINAL RESPONSE ---------------- */
 
