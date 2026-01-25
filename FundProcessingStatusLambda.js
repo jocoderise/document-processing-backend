@@ -1,88 +1,112 @@
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  QueryCommand,
+  ScanCommand
+} from "@aws-sdk/lib-dynamodb";
+
+/* ---------- CONFIG ---------- */
+
+const REGION = process.env.AWS_REGION || "us-east-1";
+const TABLE_NAME = process.env.DDB_TABLE_NAME;
+const STATUS_INDEX = "status-index";
+
+/* ---------- CLIENT ---------- */
+
+const ddb = DynamoDBDocumentClient.from(
+  new DynamoDBClient({ region: REGION })
+);
+
+/* ---------- CORS ---------- */
+
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "*",
+  "Access-Control-Allow-Headers": "*"
+};
+
+/* ---------- HANDLER ---------- */
+
 export const handler = async (event, context) => {
+
   const requestId = context.awsRequestId;
-  const timestamp = new Date().toISOString();
 
-  // Entry log
-  console.log(JSON.stringify({
-    level: "INFO",
-    stage: "ENTRY",
-    message: "FundProcessingStatusLambda invoked",
-    timestamp,
-    requestId
-  }));
+  const limit = Number(event.queryStringParameters?.limit || 20);
+  const status = event.queryStringParameters?.status;
 
-  // Log full incoming event (important for POC/debug)
-  console.log(JSON.stringify({
-    level: "DEBUG",
-    stage: "EVENT",
-    message: "Incoming API Gateway event",
-    requestId,
-    event
-  }));
+  const lastKeyParam = event.queryStringParameters?.lastKey;
 
-  // Extract path parameter
-  const fundId = event.pathParameters?.fundId;
+  const lastKey = lastKeyParam
+    ? JSON.parse(Buffer.from(lastKeyParam, "base64").toString())
+    : undefined;
 
   console.log(JSON.stringify({
     level: "INFO",
-    stage: "PARAMS",
-    message: "Extracted path parameters",
+    message: "Status request received",
     requestId,
-    fundId
+    limit,
+    status,
+    hasLastKey: !!lastKey
   }));
 
-  // Validate input
-  if (!fundId) {
+  let resp;
+
+  try {
+
+    if (status) {
+
+      resp = await ddb.send(new QueryCommand({
+        TableName: TABLE_NAME,
+        IndexName: STATUS_INDEX,
+        KeyConditionExpression: "#s = :s",
+        ExpressionAttributeNames: {
+          "#s": "status"
+        },
+        ExpressionAttributeValues: {
+          ":s": status
+        },
+        Limit: limit,
+        ExclusiveStartKey: lastKey,
+        ScanIndexForward: false
+      }));
+
+    } else {
+
+      resp = await ddb.send(new ScanCommand({
+        TableName: TABLE_NAME,
+        Limit: limit,
+        ExclusiveStartKey: lastKey
+      }));
+
+    }
+
+  } catch (err) {
+
     console.error(JSON.stringify({
       level: "ERROR",
-      stage: "VALIDATION",
-      message: "Missing fundId path parameter",
-      requestId
+      message: "DynamoDB query failed",
+      requestId,
+      error: err.message,
+      stack: err.stack
     }));
 
     return {
-      statusCode: 400,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "*",
-        "Access-Control-Allow-Headers": "*"
-      },
+      statusCode: 500,
+      headers: CORS_HEADERS,
       body: JSON.stringify({
-        error: "Missing fundId path parameter"
+        error: "Failed to fetch fund status"
       })
     };
   }
 
-  // (POC placeholder) — no upload yet
-  console.log(JSON.stringify({
-    level: "INFO",
-    stage: "PROCESSING",
-    message: "POC: fundId validated successfully",
-    requestId,
-    fundId
-  }));
-
-  // Successful response
-  const response = {
+  return {
     statusCode: 200,
-    headers: {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "*",
-      "Access-Control-Allow-Headers": "*"
-    },
+    headers: CORS_HEADERS,
     body: JSON.stringify({
-      message: "fundId received successfully",
-      fundId
+      items: resp.Items || [],
+      lastKey: resp.LastEvaluatedKey
+        ? Buffer.from(JSON.stringify(resp.LastEvaluatedKey)).toString("base64")
+        : null
     })
   };
-
-  console.log(JSON.stringify({
-    level: "INFO",
-    stage: "EXIT",
-    message: "Lambda execution completed successfully",
-    requestId,
-    response
-  }));
-
-  return response;
 };

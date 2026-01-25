@@ -1,0 +1,12 @@
+{
+    "fundId": "jo-promptbedrock-dynamo8-1234",
+    "inputFiles": [
+        "s3://highcloud-rulesgen/jo-promptbedrock-dynamo8-1234/files/PE_IMA_v2_DIRTY_PageAnchored.pdf",
+        "s3://highcloud-rulesgen/jo-promptbedrock-dynamo8-1234/files/PE_Side_Letter_v2_PageAnchored.pdf"
+    ],
+    "outputFiles": [
+        "s3://highcloud-rulesgen/jo-promptbedrock-dynamo8-1234/results/rules-engine.json"
+    ],
+    "status": "SUCCEEDED",
+    "timestamp": "2026-01-24T08:51:58.671Z"
+}

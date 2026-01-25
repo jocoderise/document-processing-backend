@@ -9,11 +9,37 @@ import {
   PutObjectCommand
 } from "@aws-sdk/client-s3";
 
+import {
+  DynamoDBClient
+} from "@aws-sdk/client-dynamodb";
+
+import {
+  DynamoDBDocumentClient,
+  UpdateCommand
+} from "@aws-sdk/lib-dynamodb";
+import {
+  SQSClient,
+  SendMessageCommand
+} from "@aws-sdk/client-sqs";
+
+
 /* ---------------- CONFIG ---------------- */
 
 const REGION = process.env.AWS_REGION || "us-east-1";
 const MODEL_ID = process.env.NOVA_MODEL_ID || "amazon.nova-pro-v1:0";
 const PROMPT_S3_URI = process.env.PROMPT_S3_URI;
+const ddbClient = new DynamoDBClient({ region: REGION });
+const ddb = DynamoDBDocumentClient.from(ddbClient);
+const DDB_TABLE_NAME = process.env.DDB_TABLE_NAME;
+if (!DDB_TABLE_NAME) {
+  throw new Error("DDB_TABLE_NAME environment variable is not set");
+}
+const sqs = new SQSClient({ region: REGION });
+const SUCCESS_QUEUE_URL = process.env.SUCCESS_QUEUE_URL;
+
+if (!SUCCESS_QUEUE_URL) {
+  throw new Error("SUCCESS_QUEUE_URL environment variable is not set");
+}
 
 /* ---------------- CLIENTS ---------------- */
 
@@ -69,6 +95,71 @@ async function readS3Text(uri) {
 
   return await resp.Body.transformToString("utf-8");
 }
+
+async function updateFundStatus({
+  fundId,
+  status,
+  resultPath,
+  errorMessage
+}) {
+  const now = new Date().toISOString();
+
+  const updateExp = [
+    "#s = :s",
+    "updatedAt = :u"
+  ];
+
+  const exprNames = {
+    "#s": "status"
+  };
+
+  const exprValues = {
+    ":s": status,
+    ":u": now
+  };
+
+  if (resultPath) {
+    updateExp.push("resultPath = :r");
+    exprValues[":r"] = resultPath;
+  }
+
+  if (errorMessage) {
+    updateExp.push("errorMessage = :e");
+    exprValues[":e"] = errorMessage;
+  }
+
+  await ddb.send(
+    new UpdateCommand({
+      TableName: DDB_TABLE_NAME,
+      Key: { fundId },
+      UpdateExpression: "SET " + updateExp.join(", "),
+      ExpressionAttributeNames: exprNames,
+      ExpressionAttributeValues: exprValues
+    })
+  );
+}
+async function sendSuccessMessage({
+  fundId,
+  inputFiles,
+  outputFiles
+}) {
+  const payload = {
+    fundId,
+    inputFiles,
+    outputFiles,
+    status: "SUCCEEDED",
+    timestamp: new Date().toISOString()
+  };
+
+  await sqs.send(
+    new SendMessageCommand({
+      QueueUrl: SUCCESS_QUEUE_URL,
+      MessageBody: JSON.stringify(payload)
+    })
+  );
+}
+
+
 
 /* ---------------- HANDLER ---------------- */
 
@@ -256,7 +347,35 @@ export const handler = async (event, context) => {
       location: `s3://${bucket}/${outputKey}`,
       durationMs: Date.now() - start
     });
+    await updateFundStatus({
+      fundId,
+      status: "SUCCEEDED",
+      resultPath: `s3://${bucket}/${outputKey}`
+    });
+
+    log("INFO", "DynamoDB status updated", {
+      requestId,
+      fundId,
+      status: "SUCCEEDED"
+    });
+    const outputFilePath = `s3://${bucket}/${outputKey}`;
+
+    await sendSuccessMessage({
+      fundId,
+      inputFiles,                // already full s3:// paths
+      outputFiles: [outputFilePath]
+    });
+
+    log("INFO", "Success message sent to SQS", {
+      requestId,
+      fundId,
+      inputFilesCount: inputFiles.length,
+      outputFilesCount: 1
+    });
+
+
   }
+
 
   return {
     ok: true,
