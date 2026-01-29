@@ -141,7 +141,7 @@ export const handler = async (event, context) => {
         createdAt: nowIso,
         updatedAt: nowIso,
 
-        ttl: ttlSeconds
+        // ttl: ttlSeconds
     };
     await dynamo.send(
         new PutCommand({
