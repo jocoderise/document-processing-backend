@@ -1,12 +1,12 @@
 {
-    "fundId": "jo-promptbedrock-dynamo8-1234",
+    "fundId": "jo-testinit2",
     "inputFiles": [
-        "s3://highcloud-rulesgen/jo-promptbedrock-dynamo8-1234/files/PE_IMA_v2_DIRTY_PageAnchored.pdf",
-        "s3://highcloud-rulesgen/jo-promptbedrock-dynamo8-1234/files/PE_Side_Letter_v2_PageAnchored.pdf"
+        "s3://highcloud-rulesgen/jo-testinit2/files/PE_IMA_v2_DIRTY_PageAnchored.pdf",
+        "s3://highcloud-rulesgen/jo-testinit2/files/PE_Side_Letter_v2_PageAnchored.pdf"
     ],
     "outputFiles": [
-        "s3://highcloud-rulesgen/jo-promptbedrock-dynamo8-1234/results/rules-engine.json"
+        "s3://highcloud-rulesgen/jo-testinit2/results/rules-engine.json"
     ],
     "status": "SUCCEEDED",
-    "timestamp": "2026-01-24T08:51:58.671Z"
+    "timestamp": "2026-01-30T03:33:59.716Z"
 }

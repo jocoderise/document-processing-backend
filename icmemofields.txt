@@ -1,0 +1,9 @@
+Strategy
+Asset
+Sector / Region
+IC Memo (deal context)
+NAV (Fund)
+Fund accounting / AUM system
+Proposed Commitment
+PM / Owner
+Status
