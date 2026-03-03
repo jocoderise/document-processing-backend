@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "strategy":           { "type": "string", "description": "Investment strategy (e.g. Private Equity, Venture Capital)" },
+    "asset":              { "type": "string", "description": "Name of the asset or company" },
+    "sectorRegion":       { "type": "string", "description": "Industry sector and/or geographic region" },
+    "dealContext":        { "type": "string", "description": "Deal context or investment thesis summary" },
+    "navFund":            { "type": "string", "description": "Fund NAV at time of memo, with currency" },
+    "aumSystem":          { "type": "string", "description": "Fund accounting or AUM system name" },
+    "proposedCommitment": { "type": "string", "description": "Proposed capital commitment with currency" },
+    "pmOwner":            { "type": "string", "description": "Portfolio Manager or deal owner" },
+    "status":             { "type": "string", "description": "Investment decision status" }
+  },
+  "required": ["strategy", "asset", "proposedCommitment", "status"],
+  "additionalProperties": false
+}

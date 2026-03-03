@@ -1,0 +1,10 @@
+{
+  "name": "fund-document-upload",
+  "version": "1.0.0",
+  "description": "Accepts base64-encoded documents and uploads them to S3",
+  "type": "module",
+  "main": "index.js",
+  "dependencies": {
+    "@aws-sdk/lib-dynamodb": "^3.0.0"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(code --version)",
+      "Bash(chmod +x /Users/josephvarghese/mine/Coderize/document-processing-backend/build.sh)",
+      "Bash(chmod +x /Users/josephvarghese/mine/Coderize/document-processing-backend/download-lambdas.sh)"
+    ]
+  }
+}

@@ -1,0 +1,56 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Bootstrap stack — creates the single platform S3 bucket used for:
+    lambdas/  — Lambda deployment ZIPs (read by CloudFormation during stack deploy)
+    assets/   — Prompts, JSON schemas, and other runtime config (read by Lambdas at runtime)
+  Deploy this ONCE before running build.sh and deploying the main stack.
+
+Parameters:
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment tag.
+
+Resources:
+
+  LambdaCodeBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-platform-${AWS::AccountId}"
+      VersioningConfiguration:
+        Status: Enabled
+      # CORS required for browser presigned-URL uploads (Rules Engine flow)
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods: [GET, PUT, POST, HEAD]
+            AllowedOrigins: ["*"]
+            AllowedHeaders: ["*"]
+            MaxAge: 3600
+      LifecycleConfiguration:
+        Rules:
+          # Expire old Lambda ZIP versions after 30 days
+          - Id: ExpireOldLambdaZips
+            Status: Enabled
+            Prefix: "lambdas/"
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+          # Expire archived fund documents after 90 days
+          - Id: ExpireArchives
+            Status: Enabled
+            Prefix: "*/archive/"
+            ExpirationInDays: 90
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+
+  LambdaCodeBucketName:
+    Description: >
+      Platform bucket name. Pass this as LambdaCodeBucket to the main stack.
+      lambdas/ — Lambda ZIPs   assets/ — prompts, schemas, runtime config
+    Value: !Ref LambdaCodeBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-lambda-code-bucket"

@@ -1,0 +1,10 @@
+{
+  "name": "fund-document-processing-worker",
+  "version": "1.0.0",
+  "description": "SQS consumer — Textract + Bedrock IC Memo extraction with AJV schema validation",
+  "type": "module",
+  "main": "index.js",
+  "dependencies": {
+    "ajv": "^8.0.0"
+  }
+}

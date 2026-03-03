@@ -1,0 +1,10 @@
+{
+  "name": "create-fund-upload",
+  "version": "1.0.0",
+  "description": "Creates a fund record and returns a presigned S3 PUT URL for IC Memo upload",
+  "type": "module",
+  "main": "index.js",
+  "dependencies": {
+    "@aws-sdk/s3-request-presigner": "^3.0.0"
+  }
+}

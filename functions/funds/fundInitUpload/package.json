@@ -1,0 +1,11 @@
+{
+  "name": "fund-init-upload",
+  "version": "1.0.0",
+  "description": "Initialises a fund session, archives previous files, returns a presigned POST URL",
+  "type": "module",
+  "main": "index.js",
+  "dependencies": {
+    "@aws-sdk/s3-presigned-post": "^3.0.0",
+    "@aws-sdk/lib-dynamodb": "^3.0.0"
+  }
+}

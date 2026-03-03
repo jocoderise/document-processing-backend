@@ -1,0 +1,7 @@
+{
+  "name": "s3-upload-trigger",
+  "version": "1.0.0",
+  "description": "Bridges S3 Put events from the upload bucket to the IC Memo SQS processing queue",
+  "type": "module",
+  "main": "index.js"
+}

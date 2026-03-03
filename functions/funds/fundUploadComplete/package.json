@@ -1,0 +1,10 @@
+{
+  "name": "fund-upload-complete",
+  "version": "1.0.0",
+  "description": "Marks upload as complete and enqueues a processing job to SQS",
+  "type": "module",
+  "main": "index.js",
+  "dependencies": {
+    "@aws-sdk/lib-dynamodb": "^3.0.0"
+  }
+}

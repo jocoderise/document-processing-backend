@@ -1,0 +1,10 @@
+{
+  "name": "fund-get-by-id",
+  "version": "1.0.0",
+  "description": "Returns a single fund record looked up by fundId",
+  "type": "module",
+  "main": "index.js",
+  "dependencies": {
+    "@aws-sdk/lib-dynamodb": "^3.0.0"
+  }
+}

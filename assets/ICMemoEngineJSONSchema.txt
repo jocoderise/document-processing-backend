@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "InvestmentCommitteeMemoCDM",
+  "type": "object",
+  "required": [
+    "tradeId",
+    "fund",
+    "strategy",
+    "asset",
+    "sector",
+    "region",
+    "icMemoContext",
+    "nav",
+    "fundAccountingSystem",
+    "proposedCommitment",
+    "portfolioManager",
+    "status"
+  ],
+  "properties": {
+    "tradeId": { "type": "string" },
+    "fund": { "type": "string" },
+    "strategy": { "type": "string" },
+    "asset": { "type": "string" },
+    "sector": { "type": "string" },
+    "region": { "type": "string" },
+    "icMemoContext": { "type": "string" },
+    "nav": {
+      "type": "object",
+      "required": ["amount", "currency", "asOfDate"],
+      "properties": {
+        "amount": { "type": "number" },
+        "currency": { "type": "string" },
+        "asOfDate": { "type": "string", "format": "date" }
+      }
+    },
+    "fundAccountingSystem": { "type": "string" },
+    "proposedCommitment": {
+      "type": "object",
+      "required": ["amount", "currency"],
+      "properties": {
+        "amount": { "type": "number" },
+        "currency": { "type": "string" }
+      }
+    },
+    "portfolioManager": { "type": "string" },
+    "status": {
+      "type": "string",
+      "enum": ["Draft", "Pending IC", "Approved", "Rejected", "Executed"]
+    }
+  }
+}

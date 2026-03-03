@@ -1,0 +1,901 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Document Processing - App Stack
+  IAM role, Lambda functions (x10), CloudWatch log groups, SQS event source mappings,
+  and API Gateway REST API.
+  Imports S3/DynamoDB from storage stack and queue URLs/ARNs from queues stack.
+  Deploy AFTER storage.yaml AND queues.yaml.
+
+Parameters:
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment label
+
+  # ── Lambda code location ─────────────────────────────────────────────────────
+  LambdaCodeBucket:
+    Type: String
+    Description: S3 bucket that holds the Lambda deployment ZIP files.
+
+  LambdaCodeKeyPrefix:
+    Type: String
+    Default: ""
+    Description: >
+      Optional path prefix inside LambdaCodeBucket (e.g. "releases/v1.2/").
+      Include a trailing slash when set.
+
+  # ── Bedrock / prompt config ───────────────────────────────────────────────────
+  NovaModelId:
+    Type: String
+    Default: "amazon.nova-pro-v1:0"
+    Description: Bedrock model ID for FundDocumentProcessorLambda (NOVA_MODEL_ID).
+
+  ICBedrockModelId:
+    Type: String
+    Default: "amazon.nova-pro-v1:0"
+    Description: Bedrock model ID for IC Memo Lambdas (BEDROCK_MODEL_ID).
+
+  ProcessorPromptKey:
+    Type: String
+    Default: "prompts/rules-engine-v1.txt"
+    Description: S3 key for the FundDocumentProcessor system prompt (PROMPT_S3_URI).
+
+  ICPromptKey:
+    Type: String
+    Default: "icmemoextractionprompt.txt"
+    Description: S3 key for the IC Memo extraction system prompt (PROMPT_KEY).
+
+  ICSchemaKey:
+    Type: String
+    Default: "icmemoschema.json"
+    Description: S3 key for the IC Memo JSON schema (SCHEMA_KEY).
+
+  # ── Misc ─────────────────────────────────────────────────────────────────────
+  RecordTTLDays:
+    Type: Number
+    Default: 30
+    Description: DynamoDB record TTL in days (RECORD_TTL_DAYS). Set to 0 to disable.
+
+  PresignExpiresSeconds:
+    Type: Number
+    Default: 900
+    Description: Presigned S3 URL expiry in seconds (PRESIGN_EXPIRES_SECONDS).
+
+Resources:
+
+  # ── IAM — Shared execution role for all Lambda functions ─────────────────────
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "doc-processing-${Environment}-lambda-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DocumentProcessingPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+
+              # ── S3 ──────────────────────────────────────────────────────────
+              - Sid: S3Objects
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:CopyObject
+                Resource: !Sub
+                  - "${BucketArn}/*"
+                  - BucketArn:
+                      Fn::ImportValue: !Sub "doc-processing-${Environment}-DocumentsBucketArn"
+
+              - Sid: S3Bucket
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource:
+                  Fn::ImportValue: !Sub "doc-processing-${Environment}-DocumentsBucketArn"
+
+              # ── DynamoDB ─────────────────────────────────────────────────────
+              - Sid: DynamoDB
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - Fn::ImportValue: !Sub "doc-processing-${Environment}-FundsTableArn"
+                  - !Sub
+                    - "${TableArn}/index/*"
+                    - TableArn:
+                        Fn::ImportValue: !Sub "doc-processing-${Environment}-FundsTableArn"
+
+              # ── SQS — send ───────────────────────────────────────────────────
+              - Sid: SQSSend
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:GetQueueUrl
+                  - sqs:GetQueueAttributes
+                Resource:
+                  - Fn::ImportValue: !Sub "doc-processing-${Environment}-ProcessingQueueArn"
+                  - Fn::ImportValue: !Sub "doc-processing-${Environment}-SuccessQueueArn"
+                  - Fn::ImportValue: !Sub "doc-processing-${Environment}-FundDocumentProcessingQueueArn"
+
+              # ── SQS — consume (required by EventSourceMappings) ──────────────
+              - Sid: SQSConsume
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:ChangeMessageVisibility
+                  - sqs:GetQueueAttributes
+                Resource:
+                  - Fn::ImportValue: !Sub "doc-processing-${Environment}-ProcessingQueueArn"
+                  - Fn::ImportValue: !Sub "doc-processing-${Environment}-FundDocumentProcessingQueueArn"
+
+              # ── Bedrock ──────────────────────────────────────────────────────
+              - Sid: Bedrock
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: "*"
+
+              # ── Textract ─────────────────────────────────────────────────────
+              - Sid: Textract
+                Effect: Allow
+                Action:
+                  - textract:DetectDocumentText
+                  - textract:AnalyzeDocument
+                Resource: "*"
+
+  # ── CloudWatch Log Groups ─────────────────────────────────────────────────────
+
+  LogGroupRulesGenerator:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/doc-processing-${Environment}-rules-generator"
+      RetentionInDays: 14
+
+  LogGroupCreateFundUpload:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/doc-processing-${Environment}-create-fund-upload"
+      RetentionInDays: 14
+
+  LogGroupFundInitUpload:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/doc-processing-${Environment}-fund-init-upload"
+      RetentionInDays: 14
+
+  LogGroupFundDocumentUpload:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/doc-processing-${Environment}-fund-document-upload"
+      RetentionInDays: 14
+
+  LogGroupFundUploadComplete:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/doc-processing-${Environment}-fund-upload-complete"
+      RetentionInDays: 14
+
+  LogGroupFundDocumentProcessor:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/doc-processing-${Environment}-fund-document-processor"
+      RetentionInDays: 30
+
+  LogGroupFundDocumentProcessingWorker:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/doc-processing-${Environment}-fund-document-processing-worker"
+      RetentionInDays: 30
+
+  LogGroupFundProcessingStatus:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/doc-processing-${Environment}-fund-processing-status"
+      RetentionInDays: 14
+
+  LogGroupFundGetById:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/doc-processing-${Environment}-fund-get-by-id"
+      RetentionInDays: 14
+
+  LogGroupICMemoExtraction:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/doc-processing-${Environment}-ic-memo-extraction"
+      RetentionInDays: 30
+
+  # ── Lambda Functions ──────────────────────────────────────────────────────────
+
+  # rulesGenerator — standalone rules generation utility, no API route or queue trigger
+  RulesGeneratorLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: LogGroupRulesGenerator
+    Properties:
+      FunctionName: !Sub "doc-processing-${Environment}-rules-generator"
+      Runtime: nodejs24.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 123
+      MemorySize: 128
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Sub "${LambdaCodeKeyPrefix}funds/rulesGenerator/rulesGenerator.zip"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # CreateFundUpload
+  # IC Memo flow step 1: create DynamoDB record + return presigned S3 PUT URL.
+  # Not wired to API Gateway in current deployment.
+  CreateFundUploadLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: LogGroupCreateFundUpload
+    Properties:
+      FunctionName: !Sub "doc-processing-${Environment}-create-fund-upload"
+      Runtime: nodejs24.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 63
+      MemorySize: 128
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Sub "${LambdaCodeKeyPrefix}funds/createFundUpload/createFundUpload.zip"
+      Environment:
+        Variables:
+          DDB_TABLE:
+            Fn::ImportValue: !Sub "doc-processing-${Environment}-FundsTableName"
+          DOC_BUCKET:
+            Fn::ImportValue: !Sub "doc-processing-${Environment}-DocumentsBucketName"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # FundInitUploadLambda
+  # Rules Engine flow step 1: archive previous files, upsert DDB, return presigned POST URL.
+  # Trigger: POST /funds/{fundId}/init
+  FundInitUploadLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: LogGroupFundInitUpload
+    Properties:
+      FunctionName: !Sub "doc-processing-${Environment}-fund-init-upload"
+      Runtime: nodejs24.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 3
+      MemorySize: 128
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Sub "${LambdaCodeKeyPrefix}funds/fundInitUpload/fundInitUpload.zip"
+      Environment:
+        Variables:
+          DOCUMENTS_BUCKET:
+            Fn::ImportValue: !Sub "doc-processing-${Environment}-DocumentsBucketName"
+          DDB_TABLE_NAME:
+            Fn::ImportValue: !Sub "doc-processing-${Environment}-FundsTableName"
+          PRESIGN_EXPIRES_SECONDS: !Ref PresignExpiresSeconds
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # FundDocumentUploadLambda
+  # Rules Engine flow: upload base64-encoded documents to S3 + enqueue to ProcessingQueue.
+  # Not wired to API Gateway in current deployment.
+  FundDocumentUploadLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: LogGroupFundDocumentUpload
+    Properties:
+      FunctionName: !Sub "doc-processing-${Environment}-fund-document-upload"
+      Runtime: nodejs24.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 63
+      MemorySize: 128
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Sub "${LambdaCodeKeyPrefix}funds/fundDocumentUpload/fundDocumentUpload.zip"
+      Environment:
+        Variables:
+          DOCUMENTS_BUCKET:
+            Fn::ImportValue: !Sub "doc-processing-${Environment}-DocumentsBucketName"
+          DYNAMODB_TABLE:
+            Fn::ImportValue: !Sub "doc-processing-${Environment}-FundsTableName"
+          PROCESSING_QUEUE_URL:
+            Fn::ImportValue: !Sub "doc-processing-${Environment}-ProcessingQueueUrl"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # FundUploadCompleteLambda
+  # Rules Engine flow: verify S3 files, update DDB status to UPLOADED, enqueue to ProcessingQueue.
+  # Trigger: POST /funds/{fundId}/documents
+  FundUploadCompleteLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: LogGroupFundUploadComplete
+    Properties:
+      FunctionName: !Sub "doc-processing-${Environment}-fund-upload-complete"
+      Runtime: nodejs24.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 63
+      MemorySize: 128
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Sub "${LambdaCodeKeyPrefix}funds/fundUploadComplete/fundUploadComplete.zip"
+      Environment:
+        Variables:
+          DYNAMODB_TABLE:
+            Fn::ImportValue: !Sub "doc-processing-${Environment}-FundsTableName"
+          BUCKET_NAME:
+            Fn::ImportValue: !Sub "doc-processing-${Environment}-DocumentsBucketName"
+          SQS_QUEUE_URL:
+            Fn::ImportValue: !Sub "doc-processing-${Environment}-ProcessingQueueUrl"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # FundDocumentProcessorLambda
+  # Rules Engine flow: SQS consumer from ProcessingQueue.
+  # Bedrock rules-engine extraction → S3 result → DDB update → SuccessQueue.
+  FundDocumentProcessorLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: LogGroupFundDocumentProcessor
+    Properties:
+      FunctionName: !Sub "doc-processing-${Environment}-fund-document-processor"
+      Runtime: nodejs24.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 63
+      MemorySize: 128
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Sub "${LambdaCodeKeyPrefix}funds/fundDocumentProcessor/fundDocumentProcessor.zip"
+      Environment:
+        Variables:
+          NOVA_MODEL_ID: !Ref NovaModelId
+          PROMPT_S3_URI: !Sub
+            - "s3://${BucketName}/${ProcessorPromptKey}"
+            - BucketName:
+                Fn::ImportValue: !Sub "doc-processing-${Environment}-DocumentsBucketName"
+          DDB_TABLE_NAME:
+            Fn::ImportValue: !Sub "doc-processing-${Environment}-FundsTableName"
+          SUCCESS_QUEUE_URL:
+            Fn::ImportValue: !Sub "doc-processing-${Environment}-SuccessQueueUrl"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # SQS trigger: ProcessingQueue → FundDocumentProcessorLambda
+  FundDocumentProcessorEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn:
+        Fn::ImportValue: !Sub "doc-processing-${Environment}-ProcessingQueueArn"
+      FunctionName: !GetAtt FundDocumentProcessorLambda.Arn
+      BatchSize: 1
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      MaximumBatchingWindowInSeconds: 0
+      Enabled: true
+
+  # FundDocumentProcessingWorkerLambda
+  # Async IC Memo worker: SQS consumer from FundDocumentProcessingQueue.
+  # Same env config as ICMemoExtractionLambda — Bedrock extraction run asynchronously.
+  FundDocumentProcessingWorkerLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: LogGroupFundDocumentProcessingWorker
+    Properties:
+      FunctionName: !Sub "doc-processing-${Environment}-fund-document-processing-worker"
+      Runtime: nodejs24.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 120
+      MemorySize: 128
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Sub "${LambdaCodeKeyPrefix}funds/fundDocumentProcessingWorker/fundDocumentProcessingWorker.zip"
+      Environment:
+        Variables:
+          BEDROCK_MODEL_ID: !Ref ICBedrockModelId
+          DDB_TABLE:
+            Fn::ImportValue: !Sub "doc-processing-${Environment}-FundsTableName"
+          DOC_BUCKET:
+            Fn::ImportValue: !Sub "doc-processing-${Environment}-DocumentsBucketName"
+          PROMPT_KEY: !Ref ICPromptKey
+          SCHEMA_KEY: !Ref ICSchemaKey
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # SQS trigger: FundDocumentProcessingQueue → FundDocumentProcessingWorkerLambda
+  FundDocumentProcessingWorkerEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn:
+        Fn::ImportValue: !Sub "doc-processing-${Environment}-FundDocumentProcessingQueueArn"
+      FunctionName: !GetAtt FundDocumentProcessingWorkerLambda.Arn
+      BatchSize: 1
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      MaximumBatchingWindowInSeconds: 0
+      Enabled: true
+
+  # FundProcessingStatusLambda
+  # List all funds with optional ?status= filter via status-index GSI.
+  # Trigger: GET /funds/status
+  FundProcessingStatusLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: LogGroupFundProcessingStatus
+    Properties:
+      FunctionName: !Sub "doc-processing-${Environment}-fund-processing-status"
+      Runtime: nodejs24.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 3
+      MemorySize: 128
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Sub "${LambdaCodeKeyPrefix}funds/fundProcessingStatus/fundProcessingStatus.zip"
+      Environment:
+        Variables:
+          DDB_TABLE_NAME:
+            Fn::ImportValue: !Sub "doc-processing-${Environment}-FundsTableName"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # FundGetByIdLambda
+  # Get single fund record by fundId.
+  # Trigger: GET /funds/{fundId}/status
+  FundGetByIdLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: LogGroupFundGetById
+    Properties:
+      FunctionName: !Sub "doc-processing-${Environment}-fund-get-by-id"
+      Runtime: nodejs24.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 63
+      MemorySize: 128
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Sub "${LambdaCodeKeyPrefix}funds/fundGetById/fundGetById.zip"
+      Environment:
+        Variables:
+          DYNAMODB_TABLE:
+            Fn::ImportValue: !Sub "doc-processing-${Environment}-FundsTableName"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ICMemoExtractionLambda
+  # IC Memo flow step 2: Textract OCR on PDF → Bedrock extraction → DynamoDB.
+  # Not wired to API Gateway in current deployment.
+  ICMemoExtractionLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: LogGroupICMemoExtraction
+    Properties:
+      FunctionName: !Sub "doc-processing-${Environment}-ic-memo-extraction"
+      Runtime: nodejs24.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 63
+      MemorySize: 128
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Sub "${LambdaCodeKeyPrefix}funds/icMemoExtraction/icMemoExtraction.zip"
+      Environment:
+        Variables:
+          BEDROCK_MODEL_ID: !Ref ICBedrockModelId
+          DDB_TABLE:
+            Fn::ImportValue: !Sub "doc-processing-${Environment}-FundsTableName"
+          DOC_BUCKET:
+            Fn::ImportValue: !Sub "doc-processing-${Environment}-DocumentsBucketName"
+          PROMPT_KEY: !Ref ICPromptKey
+          SCHEMA_KEY: !Ref ICSchemaKey
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── API Gateway — REST API ────────────────────────────────────────────────────
+  # Routes match the actual deployed DocumentProcessingApi:
+  #   GET  /funds/status              → FundProcessingStatusLambda
+  #   GET  /funds/{fundId}/status     → FundGetByIdLambda
+  #   POST /funds/{fundId}/init       → FundInitUploadLambda
+  #   POST /funds/{fundId}/documents  → FundUploadCompleteLambda
+
+  RestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "doc-processing-${Environment}-api"
+      Description: Document Processing REST API
+      EndpointConfiguration:
+        Types: [REGIONAL]
+
+  # CORS gateway responses
+  GatewayResponseDefault4XX:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref RestApi
+      ResponseType: DEFAULT_4XX
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        gatewayresponse.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+
+  GatewayResponseDefault5XX:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref RestApi
+      ResponseType: DEFAULT_5XX
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        gatewayresponse.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+
+  # ── Resources ─────────────────────────────────────────────────────────────────
+
+  ResourceFunds:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: funds
+
+  ResourceFundsStatus:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref ResourceFunds
+      PathPart: status
+
+  ResourceFundId:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref ResourceFunds
+      PathPart: "{fundId}"
+
+  ResourceFundIdStatus:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref ResourceFundId
+      PathPart: status
+
+  ResourceFundInit:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref ResourceFundId
+      PathPart: init
+
+  ResourceFundDocuments:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref ResourceFundId
+      PathPart: documents
+
+  # ── /funds OPTIONS ────────────────────────────────────────────────────────────
+
+  MethodFundsOPTIONS:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ResourceFunds
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'*'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ""
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: false
+            method.response.header.Access-Control-Allow-Methods: false
+            method.response.header.Access-Control-Allow-Origin: false
+
+  # ── /funds/status ─────────────────────────────────────────────────────────────
+
+  MethodFundsStatusGET:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ResourceFundsStatus
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Fn}/invocations"
+          - Fn: !GetAtt FundProcessingStatusLambda.Arn
+
+  MethodFundsStatusOPTIONS:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ResourceFundsStatus
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'*'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ""
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: false
+            method.response.header.Access-Control-Allow-Methods: false
+            method.response.header.Access-Control-Allow-Origin: false
+
+  # ── /funds/{fundId} OPTIONS ───────────────────────────────────────────────────
+
+  MethodFundIdOPTIONS:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ResourceFundId
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'*'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ""
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: false
+            method.response.header.Access-Control-Allow-Methods: false
+            method.response.header.Access-Control-Allow-Origin: false
+
+  # ── /funds/{fundId}/status ────────────────────────────────────────────────────
+
+  MethodFundIdStatusGET:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ResourceFundIdStatus
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Fn}/invocations"
+          - Fn: !GetAtt FundGetByIdLambda.Arn
+
+  MethodFundIdStatusOPTIONS:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ResourceFundIdStatus
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'*'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ""
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: false
+            method.response.header.Access-Control-Allow-Methods: false
+            method.response.header.Access-Control-Allow-Origin: false
+
+  # ── /funds/{fundId}/init ──────────────────────────────────────────────────────
+
+  MethodFundInitPOST:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ResourceFundInit
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Fn}/invocations"
+          - Fn: !GetAtt FundInitUploadLambda.Arn
+
+  MethodFundInitOPTIONS:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ResourceFundInit
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'*'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ""
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: false
+            method.response.header.Access-Control-Allow-Methods: false
+            method.response.header.Access-Control-Allow-Origin: false
+
+  # ── /funds/{fundId}/documents ─────────────────────────────────────────────────
+
+  MethodFundDocumentsPOST:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ResourceFundDocuments
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Fn}/invocations"
+          - Fn: !GetAtt FundUploadCompleteLambda.Arn
+
+  MethodFundDocumentsOPTIONS:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ResourceFundDocuments
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'*'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ""
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: false
+            method.response.header.Access-Control-Allow-Methods: false
+            method.response.header.Access-Control-Allow-Origin: false
+
+  # ── Deployment & Stage ────────────────────────────────────────────────────────
+
+  RestApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - MethodFundsOPTIONS
+      - MethodFundsStatusGET
+      - MethodFundsStatusOPTIONS
+      - MethodFundIdOPTIONS
+      - MethodFundIdStatusGET
+      - MethodFundIdStatusOPTIONS
+      - MethodFundInitPOST
+      - MethodFundInitOPTIONS
+      - MethodFundDocumentsPOST
+      - MethodFundDocumentsOPTIONS
+    Properties:
+      RestApiId: !Ref RestApi
+
+  RestApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref RestApi
+      DeploymentId: !Ref RestApiDeployment
+      StageName: !Ref Environment
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          ThrottlingBurstLimit: 100
+          ThrottlingRateLimit: 50
+
+  # ── Lambda permissions for API Gateway ───────────────────────────────────────
+
+  PermissionFundInitUpload:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref FundInitUploadLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*"
+
+  PermissionFundUploadComplete:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref FundUploadCompleteLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*"
+
+  PermissionFundProcessingStatus:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref FundProcessingStatusLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*"
+
+  PermissionFundGetById:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref FundGetByIdLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*"
+
+Outputs:
+
+  ApiEndpoint:
+    Description: REST API base URL
+    Value: !Sub "https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}"
+    Export:
+      Name: !Sub "doc-processing-${Environment}-ApiEndpoint"
+
+  LambdaRoleArn:
+    Description: IAM role ARN shared by all Lambda functions.
+    Value: !GetAtt LambdaExecutionRole.Arn
+    Export:
+      Name: !Sub "doc-processing-${Environment}-LambdaRoleArn"

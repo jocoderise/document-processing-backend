@@ -1,0 +1,156 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Document Processing - Queues Stack
+  SQS queues for the document processing pipeline.
+  ProcessingQueue         : FundUploadCompleteLambda / FundDocumentUploadLambda WRITE
+                            FundDocumentProcessorLambda READS (SQS trigger)
+  SuccessQueue            : FundDocumentProcessorLambda WRITES → downstream consumers
+  FundDocumentProcessing  : FundDocumentProcessingWorkerLambda READS (SQS trigger)
+  Deploy AFTER storage.yaml, BEFORE app.yaml.
+
+Parameters:
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment label
+
+  ProcessingQueueVisibilityTimeout:
+    Type: Number
+    Default: 960
+    Description: >
+      Visibility timeout for the processing queue (seconds).
+      Must exceed the FundDocumentProcessorLambda timeout (900 s max).
+
+Resources:
+
+  # ── Processing Queue ──────────────────────────────────────────────────────────
+  # FundUploadCompleteLambda and FundDocumentUploadLambda WRITE here.
+  # FundDocumentProcessorLambda is triggered from here via EventSourceMapping.
+
+  ProcessingQueueDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "doc-processing-${Environment}-processing-dlq"
+      MessageRetentionPeriod: 1209600  # 14 days
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  ProcessingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "doc-processing-${Environment}-processing"
+      VisibilityTimeout: !Ref ProcessingQueueVisibilityTimeout
+      MessageRetentionPeriod: 86400  # 1 day
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ProcessingQueueDLQ.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── Success Queue ─────────────────────────────────────────────────────────────
+  # FundDocumentProcessorLambda WRITES here after successful Bedrock extraction.
+
+  SuccessQueueDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "doc-processing-${Environment}-success-dlq"
+      MessageRetentionPeriod: 1209600  # 14 days
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  SuccessQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "doc-processing-${Environment}-success"
+      MessageRetentionPeriod: 86400  # 1 day
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt SuccessQueueDLQ.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── Fund Document Processing Queue ────────────────────────────────────────────
+  # FundDocumentProcessingWorkerLambda is triggered from here via EventSourceMapping.
+
+  FundDocumentProcessingQueueDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "doc-processing-${Environment}-fund-document-processing-dlq"
+      MessageRetentionPeriod: 1209600  # 14 days
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  FundDocumentProcessingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "doc-processing-${Environment}-fund-document-processing"
+      MessageRetentionPeriod: 86400  # 1 day
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt FundDocumentProcessingQueueDLQ.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+
+  ProcessingQueueUrl:
+    Description: SQS URL — set as SQS_QUEUE_URL on FundUploadCompleteLambda and PROCESSING_QUEUE_URL on FundDocumentUploadLambda.
+    Value: !Ref ProcessingQueue
+    Export:
+      Name: !Sub "doc-processing-${Environment}-ProcessingQueueUrl"
+
+  ProcessingQueueArn:
+    Description: SQS ARN — used by IAM policy and EventSourceMapping for FundDocumentProcessorLambda.
+    Value: !GetAtt ProcessingQueue.Arn
+    Export:
+      Name: !Sub "doc-processing-${Environment}-ProcessingQueueArn"
+
+  ProcessingDLQUrl:
+    Description: Dead-letter queue URL for failed processing jobs.
+    Value: !Ref ProcessingQueueDLQ
+    Export:
+      Name: !Sub "doc-processing-${Environment}-ProcessingDLQUrl"
+
+  SuccessQueueUrl:
+    Description: SQS URL — set as SUCCESS_QUEUE_URL on FundDocumentProcessorLambda.
+    Value: !Ref SuccessQueue
+    Export:
+      Name: !Sub "doc-processing-${Environment}-SuccessQueueUrl"
+
+  SuccessQueueArn:
+    Description: SQS ARN — used by IAM policy.
+    Value: !GetAtt SuccessQueue.Arn
+    Export:
+      Name: !Sub "doc-processing-${Environment}-SuccessQueueArn"
+
+  SuccessDLQUrl:
+    Description: Dead-letter queue URL for undeliverable success messages.
+    Value: !Ref SuccessQueueDLQ
+    Export:
+      Name: !Sub "doc-processing-${Environment}-SuccessDLQUrl"
+
+  FundDocumentProcessingQueueUrl:
+    Description: SQS URL for the fund document processing worker queue.
+    Value: !Ref FundDocumentProcessingQueue
+    Export:
+      Name: !Sub "doc-processing-${Environment}-FundDocumentProcessingQueueUrl"
+
+  FundDocumentProcessingQueueArn:
+    Description: SQS ARN — used by IAM policy and EventSourceMapping for FundDocumentProcessingWorkerLambda.
+    Value: !GetAtt FundDocumentProcessingQueue.Arn
+    Export:
+      Name: !Sub "doc-processing-${Environment}-FundDocumentProcessingQueueArn"
+
+  FundDocumentProcessingDLQUrl:
+    Description: Dead-letter queue URL for failed fund document processing jobs.
+    Value: !Ref FundDocumentProcessingQueueDLQ
+    Export:
+      Name: !Sub "doc-processing-${Environment}-FundDocumentProcessingDLQUrl"

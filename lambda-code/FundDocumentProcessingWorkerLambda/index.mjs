@@ -297,14 +297,29 @@ const processOneMessage = async ({ message, requestId }) => {
   }
 
   // Fetch fund record (strict requirement: fund must exist)
-  const fundRecord = await dynamo.send(new GetItemCommand({
+  const fundRecord = await dynamo.send(new UpdateItemCommand({
     TableName: TABLE,
-    Key: { fundId: { S: fundId } }
+    Key: { fundId: { S: fundId } },
+    UpdateExpression: `
+    SET #s = :processing,
+        updatedAt = :u,
+        objectKey = :k,
+        fileName = :f,
+        documentType = :dt
+    REMOVE errorReason
+  `,
+    ExpressionAttributeNames: {
+      "#s": "status"
+    },
+    ExpressionAttributeValues: {
+      ":processing": { S: "PROCESSING" },
+      ":u": { S: new Date().toISOString() },
+      ":k": { S: objectKey },
+      ":f": { S: fileName },
+      ":dt": { S: documentType }
+    }
   }));
 
-  if (!fundRecord.Item) {
-    throw new Error(`Fund not found: ${fundId}`);
-  }
 
   const currentStatus = fundRecord.Item.status?.S || "";
   const existingObjectKey = fundRecord.Item.objectKey?.S || "";

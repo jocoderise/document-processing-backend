@@ -1,0 +1,8 @@
+{
+  "name": "ic-memo-extraction",
+  "version": "1.0.0",
+  "description": "Extracts structured data from IC Memo PDFs using Textract and Bedrock",
+  "type": "module",
+  "main": "index.js",
+  "dependencies": {}
+}

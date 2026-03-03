@@ -1,0 +1,109 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Document Processing - Storage Stack
+  S3 bucket (documents, prompts, schemas, results) and DynamoDB table (fund records).
+  Deploy this stack FIRST before queues.yaml and app.yaml.
+
+Parameters:
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment label
+
+Resources:
+
+  # ── S3 ────────────────────────────────────────────────────────────────────────
+
+  DocumentsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "doc-processing-${Environment}-documents-${AWS::AccountId}"
+      VersioningConfiguration:
+        Status: Enabled
+      # CORS required for browser presigned-URL uploads
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods: [GET, PUT, POST, HEAD]
+            AllowedOrigins: ["*"]
+            AllowedHeaders: ["*"]
+            MaxAge: 3600
+      # Auto-expire archived files after 90 days
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireArchives
+            Status: Enabled
+            Prefix: "*/archive/"
+            ExpirationInDays: 90
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── DynamoDB ──────────────────────────────────────────────────────────────────
+  #
+  #  PK  : fundId    (String)
+  #  GSI : status-index
+  #          Partition key : status    (String)
+  #          Sort key      : updatedAt (String)
+  #          Queried by FundProcessingStatusLambda to list/filter by processing state.
+  #  TTL : ttl attribute (epoch seconds)
+
+  FundsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "doc-processing-${Environment}-funds"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: fundId
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+        - AttributeName: updatedAt
+          AttributeType: S
+      KeySchema:
+        - AttributeName: fundId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: status-index
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: updatedAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+
+  DocumentsBucketName:
+    Description: S3 bucket name — upload prompt/schema files here before first use
+    Value: !Ref DocumentsBucket
+    Export:
+      Name: !Sub "doc-processing-${Environment}-DocumentsBucketName"
+
+  DocumentsBucketArn:
+    Description: S3 bucket ARN — used by app stack IAM policy
+    Value: !GetAtt DocumentsBucket.Arn
+    Export:
+      Name: !Sub "doc-processing-${Environment}-DocumentsBucketArn"
+
+  FundsTableName:
+    Description: DynamoDB table name
+    Value: !Ref FundsTable
+    Export:
+      Name: !Sub "doc-processing-${Environment}-FundsTableName"
+
+  FundsTableArn:
+    Description: DynamoDB table ARN — used by app stack IAM policy
+    Value: !GetAtt FundsTable.Arn
+    Export:
+      Name: !Sub "doc-processing-${Environment}-FundsTableArn"

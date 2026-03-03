@@ -18,12 +18,14 @@ const dynamo = new DynamoDBClient({ region });
 
 const TABLE = process.env.DDB_TABLE;
 
-// DOC_BUCKET is the DESTINATION bucket AND also where prompt/schema already live.
-const DOC_BUCKET = process.env.DOC_BUCKET;
+// DOC_BUCKET    — Documents bucket: where results are written and input PDFs may live.
+// ASSETS_BUCKET — Platform bucket:  where prompts and schemas are stored (assets/ prefix).
+const DOC_BUCKET    = process.env.DOC_BUCKET;
+const ASSETS_BUCKET = process.env.ASSETS_BUCKET;
 
-const PROMPT_KEY = process.env.PROMPT_KEY;      // e.g. "icmemoextractionprompt.txt"
-const SCHEMA_KEY = process.env.SCHEMA_KEY;      // e.g. "schema.json"
-const MODEL_ID = process.env.BEDROCK_MODEL_ID;  // e.g. "amazon.nova-pro-v1:0"
+const PROMPT_KEY = process.env.PROMPT_KEY;      // e.g. "assets/prompts/ic-memo-system-prompt.txt"
+const SCHEMA_KEY = process.env.SCHEMA_KEY;      // e.g. "assets/prompts/ic-memo-schema.json"
+const MODEL_ID   = process.env.BEDROCK_MODEL_ID;
 
 // Stream -> string helper
 const streamToString = async (stream) =>
@@ -35,22 +37,26 @@ const streamToString = async (stream) =>
   });
 
 /**
- * SQS Message Contract
+ * SQS Message Contract (ICMemoProcessingQueue only)
+ *
+ * This queue is exclusively for ICMemo documents.
+ * IMA documents are routed to ProcessingQueue → FundDocumentProcessorLambda.
+ * Other document types (PPM, LPA, SideLetter, FundStructure, SubDoc) are not
+ * queued for processing yet.
  *
  * {
- *   "fundId": "101",
- *   "documentType": "icmemo",
- *   "bucket": "Altfundflow",  // INPUT bucket where the PDF was uploaded
- *   "key": "uploads/abc_fund/icmemo/Alt Fund Flow Sample Ic Memo.pdf",
- *   "fileName": "Alt Fund Flow Sample Ic Memo.pdf",     // optional
- *   "fundSlug": "abc_fund",                              // optional
- *   "promptKey": "icmemoextractionprompt.txt",           // optional override (stored in DOC_BUCKET)
- *   "schemaKey": "schema.json"                           // optional override (stored in DOC_BUCKET)
+ *   "fundId":       "INT#<uuid>",          // required
+ *   "documentType": "icmemo",              // required; must be "icmemo"
+ *   "bucket":       "<upload-bucket>",     // required; INPUT bucket where PDF was uploaded
+ *   "key":          "<s3-object-key>",     // required
+ *   "fileName":     "<filename.pdf>",      // optional
+ *   "fundName":     "<fund name>",         // optional
+ *   "promptKey":    "<override key>",      // optional override (read from ASSETS_BUCKET)
+ *   "schemaKey":    "<override key>"       // optional override (read from ASSETS_BUCKET)
  * }
  *
- * Important:
- * - INPUT PDF is always read from message.bucket/message.key
- * - PROMPT + SCHEMA are read from DOC_BUCKET (as per your requirement)
+ * - INPUT PDF is read from message.bucket / message.key
+ * - PROMPT + SCHEMA are read from ASSETS_BUCKET (platform bucket)
  * - OUTPUT JSON is written to DOC_BUCKET under fundId/documentType/
  */
 
@@ -90,20 +96,20 @@ const processICMemo = async ({
     Key: objectKey
   }));
 
-  // Load prompt + schema FROM DOC_BUCKET (destination bucket), per your requirement
+  // Load prompt + schema from ASSETS_BUCKET (platform bucket, assets/ prefix)
   console.log(JSON.stringify({
     level: "INFO",
     requestId,
     fundId,
     stage: "LOAD_PROMPT_SCHEMA",
-    promptBucket: DOC_BUCKET,
+    promptBucket: ASSETS_BUCKET,
     promptKey,
-    schemaBucket: DOC_BUCKET,
+    schemaBucket: ASSETS_BUCKET,
     schemaKey
   }));
 
-  const promptObj = await s3.send(new GetObjectCommand({ Bucket: DOC_BUCKET, Key: promptKey }));
-  const schemaObj = await s3.send(new GetObjectCommand({ Bucket: DOC_BUCKET, Key: schemaKey }));
+  const promptObj = await s3.send(new GetObjectCommand({ Bucket: ASSETS_BUCKET, Key: promptKey }));
+  const schemaObj = await s3.send(new GetObjectCommand({ Bucket: ASSETS_BUCKET, Key: schemaKey }));
 
   const systemPrompt = await streamToString(promptObj.Body);
   const schemaJsonText = await streamToString(schemaObj.Body);
@@ -272,28 +278,13 @@ const processOneMessage = async ({ message, requestId }) => {
     stage: "DOCUMENT_TYPE_ROUTING"
   }));
 
-  // Switch-based routing (only icmemo implemented now)
-  switch (documentType) {
-
-    case "icmemo":
-      break;
-
-    case "ima":
-    case "sideletter":
-    case "lpa":
-    case "ppm":
-    case "subdoc":
-      console.log(JSON.stringify({
-        level: "INFO",
-        requestId,
-        fundId,
-        documentType,
-        stage: "NOT_IMPLEMENTED_YET"
-      }));
-      return;
-
-    default:
-      throw new Error(`Unsupported documentType: ${documentType}`);
+  // This queue only receives ICMemo documents.
+  // IMA → ProcessingQueue; other types → no queue (see S3UploadTriggerLambda).
+  if (documentType !== "icmemo") {
+    throw new Error(
+      `Unexpected documentType "${documentType}" on ICMemoProcessingQueue. ` +
+      "Only icmemo documents should be sent to this queue."
+    );
   }
 
   // Fetch fund record (strict requirement: fund must exist)
