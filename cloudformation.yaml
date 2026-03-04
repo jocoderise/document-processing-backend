@@ -365,9 +365,6 @@ Resources:
                   - !Sub "${FundsTable.Arn}/index/*"
 
               # ── SQS — send ───────────────────────────────────────────────────
-              # FundUploadCompleteLambda sends to ProcessingQueue
-              # FundDocumentProcessorLambda sends to SuccessQueue
-              # S3UploadTriggerLambda sends to ICMemoProcessingQueue
               - Sid: SQSSend
                 Effect: Allow
                 Action:
@@ -378,11 +375,10 @@ Resources:
                   - !GetAtt ProcessingQueue.Arn
                   - !GetAtt SuccessQueue.Arn
                   - !GetAtt ICMemoProcessingQueue.Arn
+                  - !GetAtt TextractStarterQueue.Arn
+                  - !GetAtt TextractResultsQueue.Arn
 
               # ── SQS — receive/delete ─────────────────────────────────────────
-              # FundDocumentProcessorLambda and FundDocumentProcessingWorkerLambda are
-              # triggered via event source mappings; Lambda service also needs these
-              # permissions on the role.
               - Sid: SQSConsume
                 Effect: Allow
                 Action:
@@ -393,6 +389,8 @@ Resources:
                 Resource:
                   - !GetAtt ProcessingQueue.Arn
                   - !GetAtt ICMemoProcessingQueue.Arn
+                  - !GetAtt TextractStarterQueue.Arn
+                  - !GetAtt TextractResultsQueue.Arn
 
               # ── Bedrock ──────────────────────────────────────────────────────
               # FundDocumentProcessorLambda and ICMemoExtractionLambda both call Converse API.
@@ -406,13 +404,22 @@ Resources:
                 Resource: "*"
 
               # ── Textract ─────────────────────────────────────────────────────
-              # ICMemoExtractionLambda calls DetectDocumentText
               - Sid: Textract
                 Effect: Allow
                 Action:
                   - textract:DetectDocumentText
                   - textract:AnalyzeDocument
+                  - textract:StartDocumentTextDetection
+                  - textract:GetDocumentTextDetection
                 Resource: "*"
+              # Allow TextractStarterLambda to pass TextractSNSRole to Textract
+              - Sid: PassTextractSNSRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt TextractSNSRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: textract.amazonaws.com
 
   # ────────────────────────────────────────────────────────────────────────────
   # CloudWatch Log Groups (explicit, with retention)
@@ -470,7 +477,125 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-fund-document-processing-worker"
-      RetentionInDays: 30  # longer — Textract + Bedrock jobs are expensive to re-run
+      RetentionInDays: 30
+
+  # ── Async Textract pipeline ───────────────────────────────────────────────
+  # SNS topic Textract publishes to when async jobs complete.
+  TextractCompletionTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${AWS::StackName}-textract-completion"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # IAM role that Textract assumes to publish SNS notifications and write raw output to S3.
+  TextractSNSRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-textract-sns-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: textract.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: TextractSNSPublishPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref TextractCompletionTopic
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: !Sub "${DocumentsBucket.Arn}/textract/*"
+
+  # TextractStarterQueue: s3UploadTrigger → textractStarterLambda
+  TextractStarterDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-textract-starter-dlq"
+      MessageRetentionPeriod: 1209600
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  TextractStarterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-textract-starter"
+      VisibilityTimeout: 120
+      MessageRetentionPeriod: 86400
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt TextractStarterDLQ.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # TextractResultsQueue: TextractCompletionTopic (SNS) → textractResultsWorkerLambda
+  TextractResultsDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-textract-results-dlq"
+      MessageRetentionPeriod: 1209600
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  TextractResultsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-textract-results"
+      VisibilityTimeout: 960
+      MessageRetentionPeriod: 86400
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt TextractResultsDLQ.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  TextractResultsQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref TextractResultsQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt TextractResultsQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref TextractCompletionTopic
+
+  TextractResultsQueueSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref TextractCompletionTopic
+      Protocol: sqs
+      Endpoint: !GetAtt TextractResultsQueue.Arn
+
+  LogGroupTextractStarter:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-textract-starter"
+      RetentionInDays: 30
+
+  LogGroupTextractResultsWorker:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-textract-results-worker"
+      RetentionInDays: 30
 
   LogGroupS3UploadTrigger:
     Type: AWS::Logs::LogGroup
@@ -815,8 +940,8 @@ Resources:
     Properties:
       FunctionName: !Sub "${AWS::StackName}-s3-upload-trigger"
       Description: >
-        Routes PDF uploads by document type. ICMemo creates a new fund + ICMemoProcessingQueue.
-        IMA updates existing fund + ProcessingQueue. Others update fund only.
+        Routes PDF uploads by document type. ICMemo creates a new fund record.
+        All document types are enqueued to TextractStarterQueue for async Textract processing.
       Runtime: nodejs22.x
       Handler: index.handler
       Role: !GetAtt LambdaExecutionRole.Arn
@@ -827,12 +952,8 @@ Resources:
         S3Key: !Sub "${LambdaCodeKeyPrefix}s3UploadTrigger.zip"
       Environment:
         Variables:
-          DDB_TABLE:            !Ref FundsTable
-          IC_MEMO_QUEUE_URL:    !Ref ICMemoProcessingQueue
-          PROCESSING_QUEUE_URL: !Ref ProcessingQueue
-          ASSETS_BUCKET:        !Ref LambdaCodeBucket
-          DOC_BUCKET:           !Ref DocumentsBucket
-          IMA_SCHEMA_KEY:       !Ref IMASchemaKey
+          DDB_TABLE:                   !Ref FundsTable
+          TEXTRACT_STARTER_QUEUE_URL:  !Ref TextractStarterQueue
       Tags:
         - Key: Environment
           Value: !Ref Environment
@@ -852,7 +973,94 @@ Resources:
       SourceAccount: !Ref AWS::AccountId
       SourceArn: !Sub "arn:aws:s3:::${AWS::StackName}-uploads-${AWS::AccountId}"
 
-  # 11. ExternalFundCreate
+  # 11. TextractStarterLambda
+  #     Async Textract pipeline — step 1: start async Textract job for any document type.
+  #     Trigger: TextractStarterQueue (SQS)
+  #     Env vars: DDB_TABLE, TEXTRACT_SNS_TOPIC_ARN, TEXTRACT_SNS_ROLE_ARN, DOC_BUCKET
+  TextractStarterLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: LogGroupTextractStarter
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-textract-starter"
+      Description: >
+        Starts an async Textract job for any document type.
+        JobTag carries fundId|documentType so the results worker can identify the document.
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Sub "${LambdaCodeKeyPrefix}textractStarterLambda.zip"
+      Environment:
+        Variables:
+          DDB_TABLE:               !Ref FundsTable
+          TEXTRACT_SNS_TOPIC_ARN:  !Ref TextractCompletionTopic
+          TEXTRACT_SNS_ROLE_ARN:   !GetAtt TextractSNSRole.Arn
+          DOC_BUCKET:              !Ref DocumentsBucket
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  TextractStarterEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt TextractStarterQueue.Arn
+      FunctionName: !GetAtt TextractStarterLambda.Arn
+      BatchSize: 1
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      MaximumBatchingWindowInSeconds: 0
+      Enabled: true
+
+  # 12. TextractResultsWorkerLambda
+  #     Async Textract pipeline — step 2: receive Textract completion via SNS→SQS,
+  #     paginate results, run Bedrock, write result JSON, update DynamoDB.
+  #     Trigger: TextractResultsQueue (SQS, subscribed to TextractCompletionTopic SNS)
+  TextractResultsWorkerLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: LogGroupTextractResultsWorker
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-textract-results-worker"
+      Description: >
+        Receives Textract async completion notifications (SNS→SQS), paginates
+        GetDocumentTextDetection, runs Bedrock Converse, writes result JSON to S3,
+        updates DynamoDB to SUCCEEDED. Handles all document types.
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 900
+      MemorySize: 512
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Sub "${LambdaCodeKeyPrefix}textractResultsWorkerLambda.zip"
+      Environment:
+        Variables:
+          NOVA_MODEL_ID:              !Ref NovaModelId
+          ICMEMO_PROMPT_S3_URI:       !Sub "s3://${LambdaCodeBucket}/${ICPromptKey}"
+          ICMEMO_SCHEMA_S3_URI:       !Sub "s3://${LambdaCodeBucket}/${ICSchemaKey}"
+          RULES_ENGINE_PROMPT_S3_URI: !Sub "s3://${LambdaCodeBucket}/${ProcessorPromptKey}"
+          RULES_ENGINE_SCHEMA_S3_URI: !Sub "s3://${LambdaCodeBucket}/${IMASchemaKey}"
+          DDB_TABLE:                  !Ref FundsTable
+          SUCCESS_QUEUE_URL:          !Ref SuccessQueue
+          DOC_BUCKET:                 !Ref DocumentsBucket
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  TextractResultsWorkerEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt TextractResultsQueue.Arn
+      FunctionName: !GetAtt TextractResultsWorkerLambda.Arn
+      BatchSize: 1
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      MaximumBatchingWindowInSeconds: 0
+      Enabled: true
+
+  # 13. ExternalFundCreate
   #     Future external API — accepts fund ID + fund name from a third party,
   #     stores as EXT#<fundId>, returns a presigned PUT URL for document upload.
   #     Trigger: POST /funds/register
@@ -1489,6 +1697,30 @@ Outputs:
     Value: !Ref ICMemoProcessingQueueDLQ
     Export:
       Name: !Sub "${AWS::StackName}-icmemo-processing-dlq-url"
+
+  TextractCompletionTopicArn:
+    Description: SNS topic ARN — Textract publishes completion notifications here.
+    Value: !Ref TextractCompletionTopic
+    Export:
+      Name: !Sub "${AWS::StackName}-textract-completion-topic-arn"
+
+  TextractStarterQueueUrl:
+    Description: SQS URL — s3UploadTrigger sends all document types here.
+    Value: !Ref TextractStarterQueue
+    Export:
+      Name: !Sub "${AWS::StackName}-textract-starter-queue-url"
+
+  TextractResultsQueueUrl:
+    Description: SQS URL — subscribed to TextractCompletionTopic, triggers TextractResultsWorkerLambda.
+    Value: !Ref TextractResultsQueue
+    Export:
+      Name: !Sub "${AWS::StackName}-textract-results-queue-url"
+
+  TextractSNSRoleArn:
+    Description: IAM role ARN passed to Textract for SNS notification publishing.
+    Value: !GetAtt TextractSNSRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-textract-sns-role-arn"
 
   LambdaExecutionRoleArn:
     Description: IAM role ARN shared by all Lambda functions.
