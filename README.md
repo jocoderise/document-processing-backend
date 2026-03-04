@@ -56,13 +56,13 @@ Read APIs
 
 ### Three S3 Buckets
 
-**Platform bucket** — created once by `bootstrap.yaml`, shared across redeployments.
+**Lambda code bucket** (`LambdaCodeBucket`) — created once by `bootstrap.yaml`, shared across redeployments.
 Holds Lambda ZIPs and read-only assets. Lambdas never write here at runtime.
 
 ```
 <bootstrap-stack>-platform-<accountId>/
 ├── lambdas/                             ← Lambda deployment ZIPs (written by deploy.sh)
-│   └── funds/<name>/<name>.zip
+│   └── <fnName>.zip
 └── assets/                              ← Read-only schemas + prompts (written by deploy.sh)
     ├── ICMemoEngineJSONSchema.txt        ← IC Memo JSON schema   (env: ICSchemaKey)
     ├── RulesEngineJSONSchema.txt         ← IMA / Rules Engine schema (env: IMASchemaKey)
@@ -137,7 +137,7 @@ Supported document types: `icmemo`, `ima`, `sideletter`, `lpa`, `ppm`, `subdoc`,
 
 | Template | Purpose |
 |----------|---------|
-| `bootstrap.yaml` | Creates the platform bucket (lambdas/ + assets/). Deploy **once**. |
+| `bootstrap.yaml` | Creates the Lambda code bucket (lambdas/ + assets/). Deploy **once**. |
 | `cloudformation.yaml` | All application resources: 11 Lambdas, DocumentsBucket, SQS queues, DynamoDB, API Gateway, IAM. |
 
 ---
@@ -164,11 +164,11 @@ REGION=us-east-1 ./deploy.sh
 
 The script does everything in order:
 
-1. Deploys `bootstrap.yaml` — creates the platform bucket (Lambda ZIPs + assets)
+1. Deploys `bootstrap.yaml` — creates the Lambda code bucket (Lambda ZIPs + assets)
 2. Runs `build.sh` — builds all 11 Lambda ZIPs into `dist/`
-3. Syncs `dist/` → `s3://<platform-bucket>/lambdas/`
+3. Syncs `dist/` → `s3://<lambda-code-bucket>/lambdas/`
 4. Deploys `cloudformation.yaml` — all infrastructure, including the upload bucket with S3 event notification pre-configured
-5. Uploads `assets/` → `s3://<platform-bucket>/assets/`
+5. Uploads `assets/` → `s3://<lambda-code-bucket>/assets/`
 
 At the end it prints the API endpoint, upload bucket name, documents bucket name, DynamoDB table, and IC Memo queue URL.
 

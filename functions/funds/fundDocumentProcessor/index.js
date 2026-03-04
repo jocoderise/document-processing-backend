@@ -330,8 +330,10 @@ export const handler = async (event, context) => {
 
     /* ---------------- WRITE RESULT TO S3 ---------------- */
 
-    const { bucket, key } = parseS3Uri(outputPath);
-    const outputKey = `${ensureTrailingSlash(key)}rules-engine.json`;
+    const { bucket } = parseS3Uri(outputPath);
+    const safeBaseName = (inputFiles[0]?.split("/").pop() || "document").replace(/\s+/g, "_");
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    const outputKey = `${fundId}/ima/${safeBaseName}.${ts}.ima.json`;
 
     await s3.send(
       new PutObjectCommand({

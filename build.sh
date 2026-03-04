@@ -6,12 +6,10 @@
 #   ./build.sh                  # build all functions
 #   ./build.sh createFundUpload # build a single function by name
 #
-# Output: dist/<category>/<fnName>/<fnName>.zip
-#   e.g.  dist/funds/createFundUpload/createFundUpload.zip
+# Output: dist/<fnName>.zip
+#   e.g.  dist/createFundUpload.zip
 #
-# The dist/ path mirrors the S3 key structure expected by cloudformation.yaml.
-# Upload after building:
-#   aws s3 sync dist/ s3://<LambdaCodeBucket>/<LambdaCodeKeyPrefix>/
+# Run deploy.sh to build and upload everything to AWS.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -36,21 +34,19 @@ for fn_dir in "$ROOT_DIR"/functions/*/*/; do
   cp -r "$SHARED_DIR" "$fn_dir/shared"
   (cd "$fn_dir" && npm install --omit=dev --silent)
 
-  out_dir="$DIST_DIR/$category/$fn_name"
-  mkdir -p "$out_dir"
+  # AWS SDK v3 and Node.js built-ins are provided by the Lambda runtime — exclude from ZIP
+  rm -rf "$fn_dir/node_modules/@aws-sdk"
+  rm -rf "$fn_dir/node_modules/@smithy"
 
-  (cd "$fn_dir" && zip -r "$out_dir/$fn_name.zip" . \
+  (cd "$fn_dir" && zip -r "$DIST_DIR/$fn_name.zip" . \
     --exclude "*.git*" \
     --exclude ".env*" \
     --exclude "*.DS_Store")
 
   rm -rf "$fn_dir/shared"
 
-  echo "  → dist/$category/$fn_name/$fn_name.zip"
+  echo "  → dist/$fn_name.zip"
 done
 
 echo ""
 echo "Done. ZIPs in dist/"
-echo ""
-echo "To upload to S3 (set your bucket and prefix first):"
-echo "  aws s3 sync dist/ s3://<LambdaCodeBucket>/<LambdaCodeKeyPrefix>/"

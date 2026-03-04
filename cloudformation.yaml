@@ -123,13 +123,13 @@ Resources:
             AllowedMethods: [GET, PUT, POST, DELETE, HEAD]
             AllowedHeaders: ["*"]
             MaxAge: 3000
+      VersioningConfiguration:
+        Status: Enabled
       LifecycleConfiguration:
         Rules:
-          # Auto-expire archived fund documents after 90 days
+          # Auto-expire non-current (archived) versions of fund documents after 90 days
           - Id: ExpireArchives
             Status: Enabled
-            Filter:
-              Prefix: ""
             NoncurrentVersionExpiration:
               NoncurrentDays: 90
       Tags:
@@ -507,7 +507,7 @@ Resources:
       MemorySize: 256
       Code:
         S3Bucket: !Ref LambdaCodeBucket
-        S3Key: !Sub "${LambdaCodeKeyPrefix}funds/createFundUpload/createFundUpload.zip"
+        S3Key: !Sub "${LambdaCodeKeyPrefix}createFundUpload.zip"
       Environment:
         Variables:
           DDB_TABLE:               !Ref FundsTable
@@ -536,7 +536,7 @@ Resources:
       MemorySize: 256
       Code:
         S3Bucket: !Ref LambdaCodeBucket
-        S3Key: !Sub "${LambdaCodeKeyPrefix}funds/fundInitUpload/fundInitUpload.zip"
+        S3Key: !Sub "${LambdaCodeKeyPrefix}fundInitUpload.zip"
       Environment:
         Variables:
           DOCUMENTS_BUCKET: !Ref DocumentsBucket
@@ -566,7 +566,7 @@ Resources:
       MemorySize: 512  # larger for base64 decode of PDFs
       Code:
         S3Bucket: !Ref LambdaCodeBucket
-        S3Key: !Sub "${LambdaCodeKeyPrefix}funds/fundDocumentUpload/fundDocumentUpload.zip"
+        S3Key: !Sub "${LambdaCodeKeyPrefix}fundDocumentUpload.zip"
       Environment:
         Variables:
           DOCUMENTS_BUCKET: !Ref DocumentsBucket
@@ -594,7 +594,7 @@ Resources:
       MemorySize: 256
       Code:
         S3Bucket: !Ref LambdaCodeBucket
-        S3Key: !Sub "${LambdaCodeKeyPrefix}funds/fundUploadComplete/fundUploadComplete.zip"
+        S3Key: !Sub "${LambdaCodeKeyPrefix}fundUploadComplete.zip"
       Environment:
         Variables:
           DYNAMODB_TABLE: !Ref FundsTable
@@ -625,7 +625,7 @@ Resources:
       MemorySize: 1024  # Large for multi-document Bedrock payloads
       Code:
         S3Bucket: !Ref LambdaCodeBucket
-        S3Key: !Sub "${LambdaCodeKeyPrefix}funds/fundDocumentProcessor/fundDocumentProcessor.zip"
+        S3Key: !Sub "${LambdaCodeKeyPrefix}fundDocumentProcessor.zip"
       Environment:
         Variables:
           NOVA_MODEL_ID: !Ref NovaModelId
@@ -670,7 +670,7 @@ Resources:
       MemorySize: 256
       Code:
         S3Bucket: !Ref LambdaCodeBucket
-        S3Key: !Sub "${LambdaCodeKeyPrefix}funds/fundProcessingStatus/fundProcessingStatus.zip"
+        S3Key: !Sub "${LambdaCodeKeyPrefix}fundProcessingStatus.zip"
       Environment:
         Variables:
           DDB_TABLE_NAME: !Ref FundsTable
@@ -695,7 +695,7 @@ Resources:
       MemorySize: 256
       Code:
         S3Bucket: !Ref LambdaCodeBucket
-        S3Key: !Sub "${LambdaCodeKeyPrefix}funds/fundGetById/fundGetById.zip"
+        S3Key: !Sub "${LambdaCodeKeyPrefix}fundGetById.zip"
       Environment:
         Variables:
           DYNAMODB_TABLE: !Ref FundsTable
@@ -723,7 +723,7 @@ Resources:
       MemorySize: 512
       Code:
         S3Bucket: !Ref LambdaCodeBucket
-        S3Key: !Sub "${LambdaCodeKeyPrefix}funds/icMemoExtraction/icMemoExtraction.zip"
+        S3Key: !Sub "${LambdaCodeKeyPrefix}icMemoExtraction.zip"
       Environment:
         Variables:
           DOC_BUCKET:       !Ref DocumentsBucket
@@ -764,7 +764,7 @@ Resources:
       MemorySize: 512
       Code:
         S3Bucket: !Ref LambdaCodeBucket
-        S3Key: !Sub "${LambdaCodeKeyPrefix}funds/fundDocumentProcessingWorker/fundDocumentProcessingWorker.zip"
+        S3Key: !Sub "${LambdaCodeKeyPrefix}fundDocumentProcessingWorker.zip"
       Environment:
         Variables:
           DDB_TABLE:        !Ref FundsTable
@@ -792,8 +792,8 @@ Resources:
       Enabled: true
 
   # 10. S3UploadTrigger
-  #     Universal S3 event bridge: S3 Put on upload bucket → routing based on document type.
-  #     Trigger: S3 Put event (configured on external upload bucket post-deploy — see Outputs)
+  #     Universal S3 event bridge: S3 Put on UploadBucket → routing based on document type.
+  #     Trigger: S3 Put event — UploadBucket NotificationConfiguration wired in this stack.
   #     Env vars: DDB_TABLE, IC_MEMO_QUEUE_URL, PROCESSING_QUEUE_URL, ASSETS_BUCKET, DOC_BUCKET, IMA_SCHEMA_KEY
   #
   #     S3 key convention:  <prefix>/<DocumentType>/<filename>.pdf
@@ -809,19 +809,14 @@ Resources:
   #       SideLetter /
   #       FundStructure /
   #       SubDoc          → update existing fund DDB record  → no queue (no AI processing yet)
-  #
-  #     Post-deploy: configure the upload bucket to send ObjectCreated events to this Lambda ARN.
-  #     (See S3UploadTriggerLambdaArn output)
   S3UploadTriggerLambda:
     Type: AWS::Lambda::Function
     DependsOn: LogGroupS3UploadTrigger
     Properties:
       FunctionName: !Sub "${AWS::StackName}-s3-upload-trigger"
       Description: >
-        Universal S3 event bridge. Routes PDF uploads from the external upload bucket by
-        document type (derived from folder name). ICMemo creates a new fund record and
-        sends to ICMemoProcessingQueue. IMA updates an existing fund and sends to
-        ProcessingQueue. Other document types update the fund record only (AI processing TBD).
+        Routes PDF uploads by document type. ICMemo creates a new fund + ICMemoProcessingQueue.
+        IMA updates existing fund + ProcessingQueue. Others update fund only.
       Runtime: nodejs22.x
       Handler: index.handler
       Role: !GetAtt LambdaExecutionRole.Arn
@@ -829,7 +824,7 @@ Resources:
       MemorySize: 256
       Code:
         S3Bucket: !Ref LambdaCodeBucket
-        S3Key: !Sub "${LambdaCodeKeyPrefix}funds/s3UploadTrigger/s3UploadTrigger.zip"
+        S3Key: !Sub "${LambdaCodeKeyPrefix}s3UploadTrigger.zip"
       Environment:
         Variables:
           DDB_TABLE:            !Ref FundsTable
@@ -878,7 +873,7 @@ Resources:
       MemorySize: 256
       Code:
         S3Bucket: !Ref LambdaCodeBucket
-        S3Key: !Sub "${LambdaCodeKeyPrefix}funds/externalFundCreate/externalFundCreate.zip"
+        S3Key: !Sub "${LambdaCodeKeyPrefix}externalFundCreate.zip"
       Environment:
         Variables:
           DDB_TABLE:               !Ref FundsTable

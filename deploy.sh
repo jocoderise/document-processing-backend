@@ -149,14 +149,14 @@ IC_QUEUE=$(aws cloudformation describe-stacks \
   --region "$REGION")
 
 echo "  API endpoint:         $API"
-echo "  Platform bucket:      $LAMBDA_CODE_BUCKET  (lambdas/ + assets/)"
+echo "  Lambda code bucket:   $LAMBDA_CODE_BUCKET  (lambdas/ + assets/)"
 echo "  Upload bucket:        $UPLOAD_BUCKET_OUT   (PDF intake — upload here)"
 echo "  Documents bucket:     $DOCS_BUCKET         (extraction results)"
 echo "  DynamoDB table:       $TABLE"
 echo "  IC Memo SQS queue:    $IC_QUEUE"
 echo ""
 echo "▶ Upload PDFs to the upload bucket using this key pattern:"
-echo "  <prefix>/<fundSlug>/<DocumentType>/<filename>.pdf"
+echo "  <prefix>/<DocumentType>/<filename>.pdf"
 echo ""
 echo "  Supported document types: ICMemo, IMA, PPM, LPA, SideLetter, FundStructure, SubDoc"
 echo "  Required S3 metadata:"
