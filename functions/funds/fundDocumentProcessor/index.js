@@ -9,6 +9,8 @@ import {
   PutObjectCommand
 } from "@aws-sdk/client-s3";
 
+import { TextractClient, DetectDocumentTextCommand } from "@aws-sdk/client-textract";
+
 import {
   DynamoDBClient
 } from "@aws-sdk/client-dynamodb";
@@ -45,6 +47,7 @@ if (!SUCCESS_QUEUE_URL) {
 
 const bedrock = new BedrockRuntimeClient({ region: REGION });
 const s3 = new S3Client({ region: REGION });
+const textract = new TextractClient({ region: REGION });
 
 /* ---------------- LOGGER ---------------- */
 
@@ -59,14 +62,6 @@ function log(level, message, meta = {}) {
 
 /* ---------------- HELPERS ---------------- */
 
-function chunk(arr, size) {
-  const out = [];
-  for (let i = 0; i < arr.length; i += size) {
-    out.push(arr.slice(i, i + size));
-  }
-  return out;
-}
-
 function parseS3Uri(uri) {
   // s3://bucket/key...
   const [, , bucket, ...keyParts] = uri.split("/");
@@ -77,10 +72,6 @@ function parseS3Uri(uri) {
     bucket,
     key: keyParts.join("/")
   };
-}
-
-function ensureTrailingSlash(key) {
-  return key.endsWith("/") ? key : `${key}/`;
 }
 
 async function readS3Text(uri) {
@@ -217,110 +208,78 @@ export const handler = async (event, context) => {
       inputFilesCount: inputFiles.length
     });
 
-    /* ---------------- BUILD DOCUMENT MANIFEST ---------------- */
+    /* ---------------- TEXTRACT — extract text from each PDF ---------------- */
 
-    const docs = [
-      {
-        name: "RulesEngineJSONSchema",
-        format: "txt",
-        uri: schemaPath
-      },
-      ...inputFiles.map((uri, idx) => ({
-        name: `pdf_${idx + 1}`,
-        format: "pdf",
-        uri
-      }))
-    ];
+    const extractedTexts = [];
 
-    /* ---------------- BEDROCK BATCHING ---------------- */
+    for (const fileUri of inputFiles) {
+      const { bucket: srcBucket, key: srcKey } = parseS3Uri(fileUri);
+      const fileName = srcKey.split("/").pop();
 
-    const batches = chunk(docs, 5);
-    const outputs = [];
+      log("INFO", "Loading PDF for Textract", { requestId, fundId, fileUri });
 
-    for (let i = 0; i < batches.length; i++) {
-      const batch = batches[i];
+      const pdfObj = await s3.send(new GetObjectCommand({ Bucket: srcBucket, Key: srcKey }));
+      const pdfBytes = Buffer.from(await pdfObj.Body.transformToByteArray());
 
-      log("INFO", "Calling Bedrock batch", {
-        requestId,
-        fundId,
-        batch: i + 1,
-        docs: batch.length
-      });
+      log("INFO", "Textract start", { requestId, fundId, fileName });
 
-      const documentBlocks = batch.map(d => ({
-        document: {
-          name: d.name,
-          format: d.format,
-          source: { s3Location: { uri: d.uri } }
-        }
+      const textractResult = await textract.send(new DetectDocumentTextCommand({
+        Document: { Bytes: pdfBytes }
       }));
 
-      const command = new ConverseCommand({
-        modelId: MODEL_ID,
-        messages: [
-          {
-            role: "user",
-            content: [...documentBlocks, { text: prompt }]
-          }
-        ],
-        inferenceConfig: {
-          maxTokens: 6000,
-          temperature: 0.1,
-          topP: 0.9
-        }
-      });
+      const extracted = (textractResult.Blocks || [])
+        .filter(b => b.BlockType === "LINE")
+        .map(b => b.Text || "")
+        .filter(t => t)
+        .join("\n");
 
-      const bedrockStart = Date.now();
-
-      let resp;
-      try {
-        log("INFO", "Sending request to Bedrock", {
-          requestId,
-          fundId,
-          batch: i + 1
-        });
-
-        resp = await bedrock.send(command);
-
-      } catch (err) {
-        log("ERROR", "Bedrock invocation failed", {
-          requestId,
-          fundId,
-          batch: i + 1,
-          error: err.message,
-          stack: err.stack
-        });
-        throw err;
-      }
-
-      log("INFO", "Bedrock response received", {
+      log("INFO", "Textract done", {
         requestId,
         fundId,
-        batch: i + 1,
-        durationMs: Date.now() - bedrockStart
+        fileName,
+        blockCount: textractResult.Blocks?.length || 0,
+        textChars: extracted.length
       });
 
-      const text =
-        resp?.output?.message?.content
-          ?.filter(c => c?.text)
-          .map(c => c.text)
-          .join("\n\n") || "";
-
-      log("INFO", "Extracted Bedrock text", {
-        requestId,
-        fundId,
-        batch: i + 1,
-        textLength: text.length,
-        preview: text.substring(0, 300)
-      });
-
-      outputs.push(text);
+      extractedTexts.push(extracted);
     }
 
+    /* ---------------- BEDROCK — send extracted text ---------------- */
 
-    /* ---------------- MERGE FINAL RESPONSE ---------------- */
+    const schema = await readS3Text(schemaPath);
 
-    const finalOutput = outputs.join("\n\n----------------\n\n");
+    const userPrompt = `
+JSON Schema (must conform exactly):
+${schema}
+
+IMA document text to extract from:
+${extractedTexts.join("\n\n---\n\n")}
+
+${prompt}
+`;
+
+    log("INFO", "Sending to Bedrock", { requestId, fundId });
+
+    const bedrockStart = Date.now();
+    let resp;
+    try {
+      resp = await bedrock.send(new ConverseCommand({
+        modelId: MODEL_ID,
+        messages: [{ role: "user", content: [{ text: userPrompt }] }],
+        inferenceConfig: { maxTokens: 6000, temperature: 0.1, topP: 0.9 }
+      }));
+    } catch (err) {
+      log("ERROR", "Bedrock invocation failed", { requestId, fundId, error: err.message, stack: err.stack });
+      throw err;
+    }
+
+    log("INFO", "Bedrock response received", { requestId, fundId, durationMs: Date.now() - bedrockStart });
+
+    const finalOutput =
+      resp?.output?.message?.content
+        ?.filter(c => c?.text)
+        .map(c => c.text)
+        .join("\n\n") || "";
 
     log("INFO", "Bedrock processing complete", {
       requestId,
