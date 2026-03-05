@@ -21,7 +21,6 @@ Resources:
       BucketName: !Sub "${AWS::StackName}-platform-${AWS::AccountId}"
       VersioningConfiguration:
         Status: Enabled
-      # CORS required for browser presigned-URL uploads (Rules Engine flow)
       CorsConfiguration:
         CorsRules:
           - AllowedMethods: [GET, PUT, POST, HEAD]
@@ -30,13 +29,11 @@ Resources:
             MaxAge: 3600
       LifecycleConfiguration:
         Rules:
-          # Expire old Lambda ZIP versions after 30 days
           - Id: ExpireOldLambdaZips
             Status: Enabled
             Prefix: "lambdas/"
             NoncurrentVersionExpiration:
               NoncurrentDays: 30
-          # Expire archived fund documents after 90 days
           - Id: ExpireArchives
             Status: Enabled
             Prefix: "*/archive/"
