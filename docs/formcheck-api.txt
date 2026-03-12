@@ -1,0 +1,193 @@
+FormCheck API - Dev Integration Guide
+======================================
+
+HOW IT WORKS
+------------
+1. Call the API to get a presigned upload URL
+2. PUT the PDF to that URL
+3. Everything else is async - the system processes and writes the final result to DynamoDB automatically
+4. Your app reads from DynamoDB directly when needed
+
+
+STEP 1 - GET AN UPLOAD URL
+--------------------------
+Current API base URL: https://qtr7viace9.execute-api.us-east-1.amazonaws.com/dev
+POST {ApiEndpoint}/formcheck/init?fileName=my-document.pdf
+eg POST https://qtr7viace9.execute-api.us-east-1.amazonaws.com/dev/formcheck/init?fileName=my-document.pdf
+
+Response:
+{
+  "jobId":     "FCHK-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "uploadUrl": "https://s3.amazonaws.com/...",
+  "expiresIn": 900
+}
+
+Store the jobId against whatever record you are processing (loan application, investor onboarding, etc).
+
+
+STEP 2 - UPLOAD THE PDF
+-----------------------
+Take the uploadUrl from the Step 1 response and do an HTTP PUT directly to it with the raw PDF bytes.
+No Authorization header. Content-Type must be application/pdf.
+
+Example (curl):
+  curl -X PUT "{uploadUrl from Step 1}" \
+       -H "Content-Type: application/pdf" \
+       --data-binary @my-document.pdf
+
+Example (JavaScript fetch):
+  await fetch(uploadUrl, {
+    method: "PUT",
+    headers: { "Content-Type": "application/pdf" },
+    body: pdfFileBlob
+  });
+
+The uploadUrl is a presigned S3 URL - it already contains the auth credentials baked in.
+It expires 15 minutes after Step 1 was called. Do not delay between Step 1 and Step 2.
+
+
+STEP 3 - READ RESULTS FROM DYNAMODB
+------------------------------------
+Table:       CloudFormation output FormCheckTableName
+Primary key: jobId  (string, e.g. FCHK-xxxxxxxx-...)
+
+Query whenever your app needs the result. The record is always there from the moment the job is created.
+
+Key fields:
+
+  jobId          String   Primary key
+  status         String   UPLOADING -> TEXTRACT_PROCESSING -> ANALYZING -> SUCCEEDED or FAILED
+  fileName       String   Original filename
+  createdAt      String   ISO timestamp
+  completedAt    String   ISO timestamp - present when SUCCEEDED
+  errorReason    String   Present only when FAILED
+  analysisResult String   JSON string - present when SUCCEEDED, parse it
+
+Parsed analysisResult fields:
+
+  valid: true          - no mandatory fields missing, document is complete
+  incompleteSections   - fields Bedrock is confident are missing required data
+  uncertainItems       - fields that may be incomplete, flag for human review
+  uncertainItems does NOT affect valid
+
+
+REAL RESPONSE EXAMPLES
+----------------------
+
+Example 1 - 2023_FundProfile-PSG_Redacted_WHITEOUT_FLATTENED.pdf (FCHK-b74c2d06-...)
+Processed in ~50 seconds. 10 incomplete sections found.
+
+{
+  "jobId": "FCHK-b74c2d06-c5e2-4ff7-8a07-0c77198e3c1f",
+  "status": "SUCCEEDED",
+  "fileName": "2023_FundProfile-PSG_Redacted_WHITEOUT_FLATTENED.pdf",
+  "createdAt": "2026-03-12T03:14:19.378Z",
+  "completedAt": "2026-03-12T03:15:09.373Z",
+  "result": {
+    "valid": false,
+    "summary": "10 incomplete sections found",
+    "incompleteSections": [
+      {
+        "title": "Registered Address",
+        "type": "required_field",
+        "issue": "Registered Address field is blank - this is a core contact/identity field required for all investors.",
+        "page": 4,
+        "items": [
+          { "label": "Registered Address", "selected": null, "value": null }
+        ]
+      },
+      {
+        "title": "Principal Place of Business",
+        "type": "required_field",
+        "issue": "Principal Place of Business (including fax and email address) is blank - required for all investors.",
+        "page": 4,
+        "items": [
+          { "label": "Principal Place of Business (including fax and email address)", "selected": null, "value": null }
+        ]
+      },
+      {
+        "title": "Number of Equity Owners",
+        "type": "required_field",
+        "issue": "Number of equity owners field is blank on page 6.",
+        "page": 6,
+        "items": [
+          { "label": "Number of equity owners", "selected": null, "value": null }
+        ]
+      },
+      {
+        "title": "Percentage Plan Assets held by the Investor",
+        "type": "required_field",
+        "issue": "A 'Yes' checkbox is selected (true) on page 8 indicating the investor has plan assets, but the required follow-up field 'Percentage Plan Assets held by the Investor' is left blank.",
+        "page": 8,
+        "items": [
+          { "label": "Percentage Plan Assets held by the Investor", "selected": null, "value": null }
+        ]
+      },
+      {
+        "title": "CFTC / Commodity Pool Registration Details",
+        "type": "required_field",
+        "issue": "'Other exemption type' checkbox is selected (true) on page 8, but the associated 'Please specify' text field and related fields 'What is the Pool ID?', 'What is the Commodity Pool type?', and 'Please indicate the capacity in which the Fund (or Fund operator) is registered' are all blank.",
+        "page": 8,
+        "items": [
+          { "label": "Please specify (Other exemption type)", "selected": null, "value": null },
+          { "label": "What is the Pool ID?", "selected": null, "value": null },
+          { "label": "What is the Commodity Pool type?", "selected": null, "value": null },
+          { "label": "Please indicate the capacity in which the Fund (or Fund operator) is registered.", "selected": null, "value": null }
+        ]
+      },
+      {
+        "title": "If Yes, What is the control person's name?",
+        "type": "required_field",
+        "issue": "Conditional field triggered by a 'Yes' answer (Yes checkbox is true on page 11) but the control person's name has not been provided.",
+        "page": 11,
+        "items": [
+          { "label": "If Yes, What is the control person's name?", "selected": null, "value": null }
+        ]
+      },
+      {
+        "title": "If Yes, What Regulatory Body?",
+        "type": "required_field",
+        "issue": "Conditional field triggered by a 'Yes' answer (Yes checkbox is true on page 13) but the regulatory body has not been specified.",
+        "page": 13,
+        "items": [
+          { "label": "If Yes, what Regulatory Body?", "selected": null, "value": null }
+        ]
+      },
+      {
+        "title": "107 If the Investor is a 'covered fund', please complete each of the following",
+        "type": "required_field",
+        "issue": "This field appears to require completion for covered fund investors but has been left blank.",
+        "page": 14,
+        "items": [
+          { "label": "107 If the Investor is a \"covered fund\", please complete each of the following:", "selected": null, "value": null }
+        ]
+      },
+      {
+        "title": "Signed by (Page 16)",
+        "type": "signature",
+        "issue": "Primary signature field 'Signed by:' on page 16 is empty.",
+        "page": 16,
+        "items": [
+          { "label": "Signed by:", "selected": null, "value": null }
+        ]
+      },
+      {
+        "title": "Signature",
+        "type": "signature",
+        "issue": "The 'Signed by:' field is empty - a primary signature line appears to be unsigned.",
+        "page": 16,
+        "items": [
+          { "label": "Signed by:", "selected": null, "value": null }
+        ]
+      }
+    ],
+    "uncertainItems": []
+  }
+}
+
+
+NOTES
+-----
+- Processing takes ~30-120 seconds after upload depending on PDF size
+- If status is FAILED, check errorReason - could be a bad PDF or Textract failure
+- analysisResult is stored as a JSON string in DynamoDB - parse it before use
