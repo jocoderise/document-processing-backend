@@ -44,7 +44,7 @@ Parameters:
 
   FormCheckBedrockModelId:
     Type: String
-    Default: "us.anthropic.claude-sonnet-4-6-20250514-v1:0"
+    Default: "us.anthropic.claude-sonnet-4-6"
     Description: >
       Bedrock model ID used by FormCheckChunkAnalyzerLambda (form completeness analysis).
 

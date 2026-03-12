@@ -91,6 +91,25 @@ function getBlockText(block, byId) {
 }
 
 /**
+ * Returns true if a KEY block's row overlaps vertically with any SELECTION_ELEMENT
+ * on the same page.  These KEY blocks are section-header labels (e.g. "Jurisdiction",
+ * "Domicile State or Country") that Textract surfaces as null text fields — they are
+ * NOT genuine empty fill-in fields and should be excluded from the field list.
+ */
+function isSectionHeaderLabel(keyBlock, selectionRowsByPage) {
+  const bb  = keyBlock.Geometry?.BoundingBox;
+  const page = keyBlock.Page ?? 1;
+  const rows = selectionRowsByPage[page];
+  if (!bb || !rows?.length) return false;
+
+  const top    = bb.Top;
+  const bottom = bb.Top + bb.Height;
+  // Strict vertical overlap: the KEY row and a SELECTION_ELEMENT row must share
+  // at least one pixel of vertical space on the page.
+  return rows.some(r => r.top < bottom && r.bottom > top);
+}
+
+/**
  * Build a flat list of form fields from KEY_VALUE_SET and SELECTION_ELEMENT blocks.
  * Returns: [{ key, value, type, page }]
  *   type = "checkbox"   → value is boolean (true = selected)
@@ -99,6 +118,19 @@ function getBlockText(block, byId) {
  */
 function buildFormFields(blocks) {
   const byId = Object.fromEntries(blocks.map(b => [b.Id, b]));
+
+  // Pre-compute SELECTION_ELEMENT Y-ranges per page so we can detect section-header
+  // KEY blocks (e.g. "Jurisdiction", "Domicile State or Country") that share their
+  // row with checkboxes but have no text value of their own.
+  const selectionRowsByPage = {};
+  for (const block of blocks) {
+    if (block.BlockType !== "SELECTION_ELEMENT") continue;
+    const page = block.Page ?? 1;
+    const bb   = block.Geometry?.BoundingBox;
+    if (!bb) continue;
+    if (!selectionRowsByPage[page]) selectionRowsByPage[page] = [];
+    selectionRowsByPage[page].push({ top: bb.Top, bottom: bb.Top + bb.Height });
+  }
 
   const fields = [];
 
@@ -113,8 +145,10 @@ function buildFormFields(blocks) {
 
     const valueRel = (block.Relationships || []).find(r => r.Type === "VALUE");
     if (!valueRel?.Ids?.length) {
-      // Key with no value block → treat as empty text field
-      fields.push({ key: keyText, value: null, type: "text", page });
+      // Key with no value block — skip if it looks like a section header label
+      if (!isSectionHeaderLabel(block, selectionRowsByPage)) {
+        fields.push({ key: keyText, value: null, type: "text", page });
+      }
       continue;
     }
 
@@ -139,11 +173,16 @@ function buildFormFields(blocks) {
         }
         if (!hasSelection) {
           const valText = getBlockText(valueBlock, byId);
-          fields.push({ key: keyText, value: valText || null, type: "text", page });
+          // Null value + no selections: skip if this KEY row overlaps with checkboxes
+          if (valText || !isSectionHeaderLabel(block, selectionRowsByPage)) {
+            fields.push({ key: keyText, value: valText || null, type: "text", page });
+          }
         }
       } else {
         const valText = getBlockText(valueBlock, byId);
-        fields.push({ key: keyText, value: valText || null, type: "text", page });
+        if (valText || !isSectionHeaderLabel(block, selectionRowsByPage)) {
+          fields.push({ key: keyText, value: valText || null, type: "text", page });
+        }
       }
     }
   }
