@@ -1,0 +1,10 @@
+{
+  "name": "form-check-aggregator",
+  "version": "1.0.0",
+  "description": "Step Functions aggregator — merges chunk analysis results and writes final status to DynamoDB",
+  "type": "module",
+  "main": "index.js",
+  "dependencies": {
+    "@aws-sdk/lib-dynamodb": "^3.0.0"
+  }
+}

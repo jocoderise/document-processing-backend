@@ -132,12 +132,15 @@ async function processRecord(record, requestId) {
   if (!JobId)  throw new Error("Missing JobId in Textract notification");
   if (!JobTag) throw new Error("Missing JobTag in Textract notification");
 
-  // JobTag format: "<uuid>:<documentType>" (INT# prefix stripped to satisfy Textract char rules)
-  const lastColon = JobTag.lastIndexOf(":");
-  if (lastColon === -1) throw new Error(`Invalid JobTag format: ${JobTag}`);
+  // JobTag format: "<P>:<uuid>:<documentType>"  P=I(INT#) or E(EXT#)
+  const firstColon = JobTag.indexOf(":");
+  const lastColon  = JobTag.lastIndexOf(":");
+  if (firstColon === -1 || firstColon === lastColon) throw new Error(`Invalid JobTag format: ${JobTag}`);
 
+  const prefixChar   = JobTag.slice(0, firstColon);
+  const uuid         = JobTag.slice(firstColon + 1, lastColon);
   const documentType = JobTag.slice(lastColon + 1);
-  const fundId       = `INT#${JobTag.slice(0, lastColon)}`;
+  const fundId       = `${prefixChar === "I" ? "INT" : "EXT"}#${uuid}`;
 
   // Derive original filename from the S3 key in the notification
   const originalKey  = DocumentLocation?.S3ObjectName || "";

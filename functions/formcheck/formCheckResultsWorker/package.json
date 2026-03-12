@@ -1,0 +1,10 @@
+{
+  "name": "form-check-results-worker",
+  "version": "1.0.0",
+  "description": "SQS consumer — paginates Textract FORMS results and runs Bedrock completeness analysis",
+  "type": "module",
+  "main": "index.js",
+  "dependencies": {
+    "@aws-sdk/lib-dynamodb": "^3.0.0"
+  }
+}

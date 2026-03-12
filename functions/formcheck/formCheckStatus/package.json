@@ -1,0 +1,7 @@
+{
+  "name": "form-check-status",
+  "version": "1.0.0",
+  "description": "GET /formcheck/{jobId} — returns current status and result of a form check job",
+  "type": "module",
+  "main": "index.js"
+}

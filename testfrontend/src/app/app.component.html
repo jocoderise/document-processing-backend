@@ -1,0 +1,313 @@
+<div class="shell">
+
+  <!-- ── Header ─────────────────────────────────────────────────────────── -->
+  <header>
+    <span class="logo">&#128196;</span>
+    <h1>Document Upload Tester</h1>
+    <span class="env-badge">dev · us-east-1</span>
+  </header>
+
+  <!-- ── Tabs ───────────────────────────────────────────────────────────── -->
+  <nav class="tab-bar">
+    <button class="tab-btn" [class.tab-active]="activeTab === 'upload'" (click)="activeTab = 'upload'">
+      &#9650; Document Upload
+    </button>
+    <button class="tab-btn" [class.tab-active]="activeTab === 'formcheck'" (click)="activeTab = 'formcheck'">
+      &#10003; Form Check
+    </button>
+  </nav>
+
+  <main>
+
+    <!-- ══════════════════════════════════════════════════════════════════════ -->
+    <!-- UPLOAD TAB                                                            -->
+    <!-- ══════════════════════════════════════════════════════════════════════ -->
+    @if (activeTab === 'upload') {
+
+      @if (step === 'form') {
+        <section class="card">
+          <h2>Upload a Document</h2>
+
+          <div class="field">
+            <label>Document Type</label>
+            <div class="radio-row">
+              <label class="radio-opt" [class.active]="documentType === 'icmemo'">
+                <input type="radio" name="docType" value="icmemo" [(ngModel)]="documentType"> ICMemo
+              </label>
+              <label class="radio-opt" [class.active]="documentType === 'ima'">
+                <input type="radio" name="docType" value="ima" [(ngModel)]="documentType"> IMA
+              </label>
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="fundName">Fund Name <span class="req">*</span></label>
+            <input id="fundName" type="text" [(ngModel)]="fundName" placeholder="e.g. Acme Growth Fund II" autocomplete="off">
+          </div>
+
+          @if (isIMA) {
+            <div class="field">
+              <label for="fundId">
+                Fund ID <span class="req">*</span>
+                <span class="hint">The INT#… returned from the ICMemo upload, or your external ID</span>
+              </label>
+              <input id="fundId" type="text" [(ngModel)]="rawFundId" placeholder="INT#abc-123 or FUND-99" autocomplete="off">
+            </div>
+          }
+
+          <div class="field">
+            <label>PDF File <span class="req">*</span></label>
+            <div class="file-drop" (click)="fileInput.click()">
+              @if (selectedFile) {
+                <span class="file-name">&#128196; {{ selectedFile.name }} ({{ (selectedFile.size / 1024).toFixed(1) }} KB)</span>
+              } @else {
+                <span>Click to choose a PDF file</span>
+              }
+            </div>
+            <input #fileInput type="file" accept="application/pdf" (change)="onFileSelected($event)" hidden>
+          </div>
+
+          <button class="btn-primary" [disabled]="!canSubmit" (click)="startUpload()">
+            &#9650; Initialise &amp; Upload
+          </button>
+        </section>
+      }
+
+      @if (step === 'uploading') {
+        <section class="card status-card">
+          <div class="status-icon spin">&#9654;</div>
+          <h2>Uploading to S3…</h2>
+          <div class="progress-bar">
+            <div class="progress-fill" [style.width.%]="uploadProgress"></div>
+          </div>
+          <p class="pct">{{ uploadProgress }}%</p>
+        </section>
+      }
+
+      @if (step === 'processing') {
+        <section class="card status-card">
+          <div class="status-icon spin">&#9654;</div>
+          <h2>Processing…</h2>
+          <p class="fund-id-label">Fund ID: <code>{{ returnedFundId }}</code></p>
+          <div class="status-pill" [class]="'pill-' + currentStatus.toLowerCase()">{{ currentStatus }}</div>
+          <p class="poll-note">Polling every 5 s &nbsp;({{ pollCount }} checks)</p>
+        </section>
+      }
+
+      @if (step === 'done' && fundRecord) {
+        <section class="card">
+          <div class="done-header">
+            <span class="check">&#10003;</span>
+            <h2>Processing Complete</h2>
+          </div>
+
+          <table class="result-table">
+            <tr>
+              <td class="result-key">fundId</td>
+              <td class="result-val"><code>{{ fundRecord.fundId }}</code></td>
+            </tr>
+            @for (key of resultKeys(fundRecord); track key) {
+              <tr>
+                <td class="result-key">{{ key }}</td>
+                <td class="result-val">
+                  @if (key === 'resultPath') {
+                    <a [href]="$any(fundRecord[key])" target="_blank" rel="noopener">{{ fundRecord[key] }}</a>
+                  } @else {
+                    {{ fundRecord[key] }}
+                  }
+                </td>
+              </tr>
+            }
+          </table>
+
+          <button class="btn-secondary" (click)="reset()">&#8635; New Upload</button>
+        </section>
+      }
+
+      @if (step === 'error') {
+        <section class="card error-card">
+          <div class="err-icon">&#10007;</div>
+          <h2>Something went wrong</h2>
+          <p class="err-msg">{{ errorMessage }}</p>
+          <button class="btn-secondary" (click)="reset()">&#8635; Try Again</button>
+        </section>
+      }
+
+      @if (logs.length > 0) {
+        <section class="card log-card">
+          <h3>Activity Log</h3>
+          <div class="log-box" #logBox>
+            @for (line of logs; track $index) {
+              <div class="log-line">{{ line }}</div>
+            }
+          </div>
+        </section>
+      }
+
+    }
+
+    <!-- ══════════════════════════════════════════════════════════════════════ -->
+    <!-- FORM CHECK TAB                                                        -->
+    <!-- ══════════════════════════════════════════════════════════════════════ -->
+    @if (activeTab === 'formcheck') {
+
+      @if (fcStep === 'form') {
+        <section class="card">
+          <h2>Form Completeness Check</h2>
+          <p class="fc-desc">
+            Upload a PDF form to detect incomplete sections — unfilled checkboxes,
+            blank required fields, and missing signatures.
+          </p>
+
+          <div class="field">
+            <label>PDF File <span class="req">*</span></label>
+            <div class="file-drop" (click)="fcFileInput.click()">
+              @if (fcSelectedFile) {
+                <span class="file-name">&#128196; {{ fcSelectedFile.name }} ({{ (fcSelectedFile.size / 1024).toFixed(1) }} KB)</span>
+              } @else {
+                <span>Click to choose a PDF form</span>
+              }
+            </div>
+            <input #fcFileInput type="file" accept="application/pdf" (change)="onFcFileSelected($event)" hidden>
+          </div>
+
+          <button class="btn-primary" [disabled]="!fcCanSubmit" (click)="startFormCheck()">
+            &#10003; Check Form Completeness
+          </button>
+        </section>
+      }
+
+      @if (fcStep === 'uploading') {
+        <section class="card status-card">
+          <div class="status-icon spin">&#9654;</div>
+          <h2>Uploading to S3…</h2>
+          <div class="progress-bar">
+            <div class="progress-fill" [style.width.%]="fcUploadProgress"></div>
+          </div>
+          <p class="pct">{{ fcUploadProgress }}%</p>
+        </section>
+      }
+
+      @if (fcStep === 'processing') {
+        <section class="card status-card">
+          <div class="status-icon spin">&#9654;</div>
+          <h2>Analyzing form…</h2>
+          <p class="fund-id-label">Job ID: <code>{{ fcJobId }}</code></p>
+          <div class="status-pill" [class]="'pill-' + fcCurrentStatus.toLowerCase().replace('_', '-')">{{ fcCurrentStatus }}</div>
+          <p class="poll-note">Polling every 5 s &nbsp;({{ fcPollCount }} checks)</p>
+        </section>
+      }
+
+      @if (fcStep === 'done' && fcResult) {
+        <section class="card">
+          <div class="done-header">
+            @if (fcResult.valid) {
+              <span class="check">&#10003;</span>
+              <h2>Form is Complete</h2>
+            } @else {
+              <span class="warn-icon">&#9888;</span>
+              <h2>Incomplete Sections Found</h2>
+            }
+          </div>
+
+          <p class="fc-summary">{{ fcResult.summary }}</p>
+          @if (fcDocumentName) {
+            <p class="fund-id-label">Document: <strong>{{ fcDocumentName }}</strong></p>
+          }
+          <p class="fund-id-label">Job ID: <code>{{ fcJobId }}</code></p>
+
+          @if (fcResult.incompleteSections.length > 0) {
+            <div class="fc-section-header">
+              <span class="fc-badge fc-badge-warn">{{ fcResult.incompleteSections.length }} Incomplete</span>
+            </div>
+            @for (section of fcResult.incompleteSections; track $index) {
+              <div class="fc-section fc-section-incomplete">
+                <div class="fc-section-title" (click)="toggleSection($index)">
+                  <span class="fc-section-expand">{{ fcExpandedSections.has($index) ? '▾' : '▸' }}</span>
+                  <strong>{{ section.title }}</strong>
+                  <span class="fc-tag fc-tag-{{ section.type }}">{{ section.type }}</span>
+                  @if (section.page) {
+                    <span class="fc-page">p.{{ section.page }}</span>
+                  }
+                  <span class="fc-issue">{{ section.issue }}</span>
+                </div>
+                @if (fcExpandedSections.has($index)) {
+                  <div class="fc-items">
+                    @for (item of section.items; track $index) {
+                      <div class="fc-item">
+                        <span class="fc-item-label">{{ item.label }}</span>
+                        @if (item.selected !== null && item.selected !== undefined) {
+                          <span class="fc-item-val" [class.fc-selected]="item.selected" [class.fc-unselected]="!item.selected">
+                            {{ item.selected ? '☑ Selected' : '☐ Not selected' }}
+                          </span>
+                        } @else {
+                          <span class="fc-item-val fc-empty">{{ item.value || '(blank)' }}</span>
+                        }
+                      </div>
+                    }
+                  </div>
+                }
+              </div>
+            }
+          }
+
+          @if (fcResult.uncertainItems?.length > 0) {
+            <div class="fc-section-header" style="margin-top:16px">
+              <span class="fc-badge fc-badge-warn" style="background:#f59e0b">{{ fcResult.uncertainItems.length }} Needs Review</span>
+            </div>
+            @for (item of fcResult.uncertainItems; track $index) {
+              <div class="fc-section" style="border-left-color:#f59e0b">
+                <div class="fc-section-title" (click)="toggleSection(1000 + $index)">
+                  <span class="fc-section-expand">{{ fcExpandedSections.has(1000 + $index) ? '▾' : '▸' }}</span>
+                  <strong>{{ item.title }}</strong>
+                  <span class="fc-tag" style="background:#fef3c7;color:#92400e">uncertain</span>
+                </div>
+                @if (fcExpandedSections.has(1000 + $index)) {
+                  <div class="fc-items">
+                    <div class="fc-item" style="color:#92400e;font-style:italic">{{ item.reason }}</div>
+                    @for (field of item.items; track $index) {
+                      <div class="fc-item">
+                        <span class="fc-item-label">{{ field.label }}</span>
+                        @if (field.selected !== null && field.selected !== undefined) {
+                          <span class="fc-item-val fc-selected">
+                            {{ field.selected ? '☑ Selected' : '☐ Not selected' }}
+                          </span>
+                        } @else {
+                          <span class="fc-item-val">{{ field.value || '(blank)' }}</span>
+                        }
+                      </div>
+                    }
+                  </div>
+                }
+              </div>
+            }
+          }
+
+          <button class="btn-secondary" (click)="resetFormCheck()">&#8635; New Check</button>
+        </section>
+      }
+
+      @if (fcStep === 'error') {
+        <section class="card error-card">
+          <div class="err-icon">&#10007;</div>
+          <h2>Something went wrong</h2>
+          <p class="err-msg">{{ fcErrorMessage }}</p>
+          <button class="btn-secondary" (click)="resetFormCheck()">&#8635; Try Again</button>
+        </section>
+      }
+
+      @if (fcLogs.length > 0) {
+        <section class="card log-card">
+          <h3>Activity Log</h3>
+          <div class="log-box" #fcLogBox>
+            @for (line of fcLogs; track $index) {
+              <div class="log-line">{{ line }}</div>
+            }
+          </div>
+        </section>
+      }
+
+    }
+
+  </main>
+</div>

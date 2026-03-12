@@ -87,12 +87,37 @@ if [[ "$MODE" == "all" || "$MODE" == "stack" ]]; then
   aws cloudformation deploy \
     --stack-name "$STACK_NAME" \
     --template-file "$ROOT_DIR/cloudformation.yaml" \
+    --s3-bucket "$LAMBDA_CODE_BUCKET" \
+    --s3-prefix "cfn-templates" \
     --capabilities CAPABILITY_NAMED_IAM \
     --region "$REGION" \
     --no-fail-on-empty-changeset \
     --parameter-overrides \
       LambdaCodeBucket="$LAMBDA_CODE_BUCKET" \
       Environment="$ENVIRONMENT"
+fi
+
+# ── Step 4b: Force Lambda code refresh (CF doesn't re-read S3 when key is unchanged) ──
+if [[ "$MODE" == "all" ]]; then
+  echo ""
+  echo "▶ Refreshing Lambda code from S3..."
+  for FN_ZIP in "$ROOT_DIR"/dist/*.zip; do
+    FN_NAME=$(basename "$FN_ZIP" .zip)
+    LAMBDA_NAME=$(aws cloudformation list-stack-resources \
+      --stack-name "$STACK_NAME" \
+      --region "$REGION" \
+      --query "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function' && contains(PhysicalResourceId, \`$FN_NAME\`)].PhysicalResourceId | [0]" \
+      --output text 2>/dev/null)
+    if [[ "$LAMBDA_NAME" != "None" && -n "$LAMBDA_NAME" ]]; then
+      aws lambda update-function-code \
+        --function-name "$LAMBDA_NAME" \
+        --s3-bucket "$LAMBDA_CODE_BUCKET" \
+        --s3-key "lambdas/$FN_NAME.zip" \
+        --region "$REGION" \
+        --query 'FunctionName' \
+        --output text 2>/dev/null && echo "  ✓ $LAMBDA_NAME"
+    fi
+  done
 fi
 
 # ── Step 5: Upload schemas and prompts to assets/ prefix ──────────────────────

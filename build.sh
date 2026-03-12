@@ -20,8 +20,15 @@ FILTER="${1:-}"   # optional: ./build.sh createFundUpload
 
 mkdir -p "$DIST_DIR"
 
-for fn_dir in "$ROOT_DIR"/functions/*/*/; do
+# Build active lambdas (functions/*/*/) and old_rest lambdas (functions/*/old_rest/*/).
+# old_rest lambdas are built with their original zip names so CloudFormation
+# references remain valid for the deprecated routes.
+for fn_dir in "$ROOT_DIR"/functions/*/*/ "$ROOT_DIR"/functions/*/old_rest/*/; do
+  [[ -d "$fn_dir" ]] || continue
   fn_name=$(basename "$fn_dir")
+  # Skip directory containers (old_rest itself, shared utility directories)
+  [[ "$fn_name" == "old_rest" ]] && continue
+  [[ "$fn_name" == "shared"   ]] && continue
   category=$(basename "$(dirname "$fn_dir")")
 
   # If a filter was provided, skip everything that doesn't match

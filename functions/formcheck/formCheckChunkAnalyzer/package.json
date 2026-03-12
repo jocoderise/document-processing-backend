@@ -1,0 +1,8 @@
+{
+  "name": "form-check-chunk-analyzer",
+  "version": "1.0.0",
+  "description": "Step Functions task — analyzes one page-range chunk of form fields with Bedrock",
+  "type": "module",
+  "main": "index.js",
+  "dependencies": {}
+}

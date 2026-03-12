@@ -42,6 +42,12 @@ Parameters:
     Description: >
       Bedrock model ID used by ICMemoExtractionLambda (IC memo flow).
 
+  FormCheckBedrockModelId:
+    Type: String
+    Default: "us.anthropic.claude-sonnet-4-6-20250514-v1:0"
+    Description: >
+      Bedrock model ID used by FormCheckChunkAnalyzerLambda (form completeness analysis).
+
   # ── S3 keys for prompt/schema assets (stored under assets/ in the platform bucket) ──
   ProcessorPromptKey:
     Type: String
@@ -363,6 +369,7 @@ Resources:
                 Resource:
                   - !GetAtt FundsTable.Arn
                   - !Sub "${FundsTable.Arn}/index/*"
+                  - !GetAtt FormCheckTable.Arn
 
               # ── SQS — send ───────────────────────────────────────────────────
               - Sid: SQSSend
@@ -377,6 +384,7 @@ Resources:
                   - !GetAtt ICMemoProcessingQueue.Arn
                   - !GetAtt TextractStarterQueue.Arn
                   - !GetAtt TextractResultsQueue.Arn
+                  - !GetAtt FormCheckResultsQueue.Arn
 
               # ── SQS — receive/delete ─────────────────────────────────────────
               - Sid: SQSConsume
@@ -391,6 +399,24 @@ Resources:
                   - !GetAtt ICMemoProcessingQueue.Arn
                   - !GetAtt TextractStarterQueue.Arn
                   - !GetAtt TextractResultsQueue.Arn
+                  - !GetAtt FormCheckResultsQueue.Arn
+
+              # ── S3 — FormCheck bucket ─────────────────────────────────────────
+              # Using hardcoded name pattern to avoid circular dependency
+              # (FormCheckBucket → FormCheckWorkerLambda → LambdaExecutionRole → FormCheckBucket).
+              - Sid: S3FormCheckBucketAccess
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:HeadObject
+                Resource: !Sub "arn:aws:s3:::${AWS::StackName}-formcheck-${AWS::AccountId}/*"
+              - Sid: S3FormCheckBucketList
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource: !Sub "arn:aws:s3:::${AWS::StackName}-formcheck-${AWS::AccountId}"
 
               # ── Bedrock ──────────────────────────────────────────────────────
               # FundDocumentProcessorLambda and ICMemoExtractionLambda both call Converse API.
@@ -403,6 +429,14 @@ Resources:
                   - bedrock:InvokeModelWithResponseStream
                 Resource: "*"
 
+              - Sid: BedrockMarketplace
+                Effect: Allow
+                Action:
+                  - aws-marketplace:Subscribe
+                  - aws-marketplace:Unsubscribe
+                  - aws-marketplace:ViewSubscriptions
+                Resource: "*"
+
               # ── Textract ─────────────────────────────────────────────────────
               - Sid: Textract
                 Effect: Allow
@@ -411,6 +445,8 @@ Resources:
                   - textract:AnalyzeDocument
                   - textract:StartDocumentTextDetection
                   - textract:GetDocumentTextDetection
+                  - textract:StartDocumentAnalysis
+                  - textract:GetDocumentAnalysis
                 Resource: "*"
               # Allow TextractStarterLambda to pass TextractSNSRole to Textract
               - Sid: PassTextractSNSRole
@@ -421,10 +457,275 @@ Resources:
                   StringEquals:
                     iam:PassedToService: textract.amazonaws.com
 
+              # ── Step Functions — FormCheck state machine ─────────────────────
+              # FormCheckResultsWorkerLambda calls StartExecution on the FormCheck
+              # state machine after extracting Textract fields.
+              # Using name-pattern ARN (not !GetAtt) to avoid circular dependency:
+              #   LambdaExecutionRole → FormCheckStateMachine → ChunkAnalyzerLambda → LambdaExecutionRole
+              - Sid: StepFunctionsFormCheck
+                Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${AWS::StackName}-formcheck-analyzer"
+
   # ────────────────────────────────────────────────────────────────────────────
   # CloudWatch Log Groups (explicit, with retention)
   # ────────────────────────────────────────────────────────────────────────────
 
+  # ────────────────────────────────────────────────────────────────────────────
+  # FormCheck — dedicated infrastructure (independent from funds pipeline)
+  # ────────────────────────────────────────────────────────────────────────────
+
+  FormCheckTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-formcheck"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: jobId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: jobId
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # SNS topic for Textract to publish FormCheck completion notifications
+  FormCheckTextractTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${AWS::StackName}-formcheck-textract"
+
+  # DLQ + main queue for FormCheck Textract results
+  FormCheckResultsDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-formcheck-results-dlq"
+      MessageRetentionPeriod: 1209600
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  FormCheckResultsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-formcheck-results"
+      VisibilityTimeout: 960
+      MessageRetentionPeriod: 86400
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt FormCheckResultsDLQ.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  FormCheckResultsQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref FormCheckResultsQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt FormCheckResultsQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref FormCheckTextractTopic
+
+  FormCheckResultsQueueSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref FormCheckTextractTopic
+      Protocol: sqs
+      Endpoint: !GetAtt FormCheckResultsQueue.Arn
+
+  # S3 bucket dedicated to FormCheck uploads (separate from UploadBucket to avoid
+  # S3 notification filter overlap with S3UploadTriggerLambda)
+  # Must DependsOn PermissionFormCheckWorker so the bucket can reference the Lambda ARN
+  FormCheckBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: PermissionFormCheckWorker
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-formcheck-${AWS::AccountId}"
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins: ["*"]
+            AllowedMethods: [GET, PUT, POST, DELETE, HEAD]
+            AllowedHeaders: ["*"]
+            MaxAge: 3000
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: "s3:ObjectCreated:*"
+            Function: !GetAtt FormCheckWorkerLambda.Arn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── FormCheck Step Functions (parallel chunk analysis) ───────────────────────
+
+  # IAM role for the Step Functions state machine to invoke ChunkAnalyzer + Aggregator Lambdas
+  FormCheckSFNRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-formcheck-sfn-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambda
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - !GetAtt FormCheckChunkAnalyzerLambda.Arn
+                  - !GetAtt FormCheckAggregatorLambda.Arn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # State machine:
+  #   Map state — fans out to N parallel FormCheckChunkAnalyzerLambda invocations
+  #   (one per 5-page chunk, with boundary-extension already embedded in the ranges)
+  #   then calls FormCheckAggregatorLambda to merge results and write SUCCEEDED to DDB.
+  FormCheckStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    DependsOn:
+      - FormCheckChunkAnalyzerLambda
+      - FormCheckAggregatorLambda
+    Properties:
+      StateMachineName: !Sub "${AWS::StackName}-formcheck-analyzer"
+      RoleArn: !GetAtt FormCheckSFNRole.Arn
+      StateMachineType: EXPRESS
+      DefinitionString: !Sub |
+        {
+          "Comment": "FormCheck parallel Bedrock chunk analysis",
+          "StartAt": "AnalyzeChunks",
+          "States": {
+            "AnalyzeChunks": {
+              "Type": "Map",
+              "ItemsPath": "$.chunks",
+              "ItemSelector": {
+                "jobId.$": "$.jobId",
+                "fieldsS3Key.$": "$.fieldsS3Key",
+                "totalFields.$": "$.totalFields",
+                "startPage.$": "$$.Map.Item.Value.startPage",
+                "endPage.$": "$$.Map.Item.Value.endPage"
+              },
+              "MaxConcurrency": 10,
+              "ItemProcessor": {
+                "ProcessorConfig": {
+                  "Mode": "INLINE"
+                },
+                "StartAt": "AnalyzeOneChunk",
+                "States": {
+                  "AnalyzeOneChunk": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke",
+                    "Parameters": {
+                      "FunctionName": "${FormCheckChunkAnalyzerLambda.Arn}",
+                      "Payload.$": "$"
+                    },
+                    "ResultSelector": {
+                      "incompleteSections.$": "$.Payload.incompleteSections"
+                    },
+                    "Retry": [
+                      {
+                        "ErrorEquals": [
+                          "States.TaskFailed",
+                          "Lambda.ServiceException",
+                          "Lambda.AWSLambdaException",
+                          "Lambda.SdkClientException"
+                        ],
+                        "IntervalSeconds": 5,
+                        "MaxAttempts": 2,
+                        "BackoffRate": 2
+                      }
+                    ],
+                    "End": true
+                  }
+                }
+              },
+              "ResultPath": "$.chunkResults",
+              "Next": "AggregateResults"
+            },
+            "AggregateResults": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${FormCheckAggregatorLambda.Arn}",
+                "Payload": {
+                  "jobId.$": "$.jobId",
+                  "chunkResults.$": "$.chunkResults"
+                }
+              },
+              "ResultPath": null,
+              "End": true
+            }
+          }
+        }
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── FormCheck CloudWatch Log Groups ───────────────────────────────────────────
+
+  LogGroupFormCheckInit:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-form-check-init"
+      RetentionInDays: 14
+
+  LogGroupFormCheckWorker:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-form-check-worker"
+      RetentionInDays: 30
+
+  LogGroupFormCheckResultsWorker:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-form-check-results-worker"
+      RetentionInDays: 30
+
+  LogGroupFormCheckStatus:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-form-check-status"
+      RetentionInDays: 14
+
+  LogGroupFormCheckChunkAnalyzer:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-form-check-chunk-analyzer"
+      RetentionInDays: 30
+
+  LogGroupFormCheckAggregator:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-form-check-aggregator"
+      RetentionInDays: 30
+
+  LogGroupInitDocumentUpload:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-init-document-upload"
+      RetentionInDays: 14
+
+  # DEPRECATED — superseded by InitDocumentUploadLambda (POST /funds/upload/init)
   LogGroupCreateFundUpload:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -508,7 +809,9 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: sns:Publish
-                Resource: !Ref TextractCompletionTopic
+                Resource:
+                  - !Ref TextractCompletionTopic
+                  - !Ref FormCheckTextractTopic
               - Effect: Allow
                 Action:
                   - s3:PutObject
@@ -613,7 +916,42 @@ Resources:
   # Lambda Functions
   # ────────────────────────────────────────────────────────────────────────────
 
-  # 1. CreateFundUpload
+  # 1. InitDocumentUpload
+  #    Unified REST upload init — supports ICMemo and IMA document types.
+  #    Creates a fund record in DDB and returns a presigned S3 PUT URL whose
+  #    key path (uploads/<DocType>/<fundId>/<fileName>) is recognised by
+  #    S3UploadTriggerLambda, so the S3 trigger pipeline runs automatically
+  #    after the client uploads the PDF.
+  #    Trigger: POST /funds/upload/init?documentType=icmemo|ima&fundName=...
+  #    Env vars: DDB_TABLE, DOC_BUCKET, PRESIGN_EXPIRES_SECONDS
+  InitDocumentUploadLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: LogGroupInitDocumentUpload
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-init-document-upload"
+      Description: >
+        Unified ICMemo/IMA upload init: creates a fund record in DynamoDB and
+        returns a presigned S3 PUT URL. The S3 key includes the document type
+        folder so S3UploadTriggerLambda routes it through the Textract pipeline.
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Sub "${LambdaCodeKeyPrefix}initDocumentUpload.zip"
+      Environment:
+        Variables:
+          DDB_TABLE:               !Ref FundsTable
+          DOC_BUCKET:              !Ref UploadBucket
+          PRESIGN_EXPIRES_SECONDS: !Ref PresignExpiresSeconds
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # DEPRECATED — superseded by InitDocumentUploadLambda (POST /funds/upload/init)
+  # 2. CreateFundUpload
   #    IC Memo flow — step 1: create fund record in DDB + return presigned PUT URL
   #    Trigger: POST /funds
   #    Env vars: DDB_TABLE, DOC_BUCKET, PRESIGN_EXPIRES_SECONDS
@@ -1091,6 +1429,197 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
+  # ── FormCheck Lambda Functions ────────────────────────────────────────────────
+  #
+  # Independent form-completeness validation pipeline:
+  #   POST /formcheck/init    → FormCheckInitLambda
+  #   GET  /formcheck/{jobId} → FormCheckStatusLambda
+  #   S3 ObjectCreated (FormCheckBucket) → FormCheckWorkerLambda
+  #   FormCheckResultsQueue (SNS→SQS)    → FormCheckResultsWorkerLambda
+  #
+  # FormCheckInitLambda
+  #   Creates FCHK#<uuid> record in FormCheckTable and returns presigned PUT URL
+  #   for the caller to upload the PDF directly to FormCheckBucket.
+  FormCheckInitLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: LogGroupFormCheckInit
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-form-check-init"
+      Description: >
+        POST /formcheck/init — creates a FormCheck job record and returns a
+        presigned S3 PUT URL so the caller can upload a PDF for form completeness checking.
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Sub "${LambdaCodeKeyPrefix}formCheckInit.zip"
+      Environment:
+        Variables:
+          FORM_CHECK_TABLE:        !Ref FormCheckTable
+          FORM_CHECK_BUCKET:       !Ref FormCheckBucket
+          PRESIGN_EXPIRES_SECONDS: !Ref PresignExpiresSeconds
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # FormCheckWorkerLambda
+  #   S3 trigger on FormCheckBucket — starts async Textract FORMS+TABLES analysis job.
+  FormCheckWorkerLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: LogGroupFormCheckWorker
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-form-check-worker"
+      Description: >
+        S3 trigger (FormCheckBucket) — starts Textract StartDocumentAnalysis with
+        FORMS+TABLES feature types and updates job status to TEXTRACT_PROCESSING.
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Sub "${LambdaCodeKeyPrefix}formCheckWorker.zip"
+      Environment:
+        Variables:
+          FORM_CHECK_TABLE:        !Ref FormCheckTable
+          TEXTRACT_SNS_TOPIC_ARN:  !Ref FormCheckTextractTopic
+          TEXTRACT_SNS_ROLE_ARN:   !GetAtt TextractSNSRole.Arn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # FormCheckResultsWorkerLambda
+  #   SQS trigger (FormCheckResultsQueue) — paginates GetDocumentAnalysis, extracts
+  #   form fields, writes fields.json to S3, then starts FormCheckStateMachine.
+  FormCheckResultsWorkerLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: LogGroupFormCheckResultsWorker
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-form-check-results-worker"
+      Description: >
+        SQS consumer (FormCheckResultsQueue) — paginates Textract FORMS results,
+        extracts form fields, writes fields.json to S3, then starts the
+        FormCheckStateMachine (Map state) for parallel Bedrock chunk analysis.
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Sub "${LambdaCodeKeyPrefix}formCheckResultsWorker.zip"
+      Environment:
+        Variables:
+          FORM_CHECK_TABLE:    !Ref FormCheckTable
+          FORM_CHECK_BUCKET:   !Ref FormCheckBucket
+          FORM_CHECK_SFN_ARN:  !GetAtt FormCheckStateMachine.Arn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  FormCheckResultsWorkerEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt FormCheckResultsQueue.Arn
+      FunctionName:   !GetAtt FormCheckResultsWorkerLambda.Arn
+      BatchSize: 1
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      MaximumBatchingWindowInSeconds: 0
+      Enabled: true
+
+  # FormCheckStatusLambda
+  #   GET /formcheck/{jobId} — returns current job status and result from FormCheckTable.
+  FormCheckStatusLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: LogGroupFormCheckStatus
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-form-check-status"
+      Description: >
+        GET /formcheck/{jobId} — returns the current status and analysis result of
+        a form completeness check job.
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 15
+      MemorySize: 128
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Sub "${LambdaCodeKeyPrefix}formCheckStatus.zip"
+      Environment:
+        Variables:
+          FORM_CHECK_TABLE: !Ref FormCheckTable
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # FormCheckChunkAnalyzerLambda
+  #   Step Functions Map task — reads fields.json from S3 for its assigned page range,
+  #   filters to incomplete fields only, calls Bedrock, returns incompleteSections[].
+  FormCheckChunkAnalyzerLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: LogGroupFormCheckChunkAnalyzer
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-form-check-chunk-analyzer"
+      Description: >
+        Step Functions Map task — reads a page-range slice of form fields from S3,
+        calls Bedrock to identify incomplete sections, returns incompleteSections[].
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Sub "${LambdaCodeKeyPrefix}formCheckChunkAnalyzer.zip"
+      Environment:
+        Variables:
+          FORM_CHECK_BUCKET: !Ref FormCheckBucket
+          BEDROCK_MODEL_ID:  !Ref FormCheckBedrockModelId
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # FormCheckAggregatorLambda
+  #   Step Functions final task — receives all chunk results from the Map state,
+  #   deduplicates incomplete sections, writes SUCCEEDED to DynamoDB.
+  FormCheckAggregatorLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: LogGroupFormCheckAggregator
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-form-check-aggregator"
+      Description: >
+        Step Functions aggregator — merges incompleteSections arrays from all
+        chunk analyzers, deduplicates by title, writes final result to DynamoDB.
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Sub "${LambdaCodeKeyPrefix}formCheckAggregator.zip"
+      Environment:
+        Variables:
+          FORM_CHECK_TABLE: !Ref FormCheckTable
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ─── S3 permission: allow FormCheckBucket to invoke FormCheckWorkerLambda ────
+  # Must be created BEFORE FormCheckBucket (FormCheckBucket DependsOn this resource)
+  PermissionFormCheckWorker:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref FormCheckWorkerLambda
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub "arn:aws:s3:::${AWS::StackName}-formcheck-${AWS::AccountId}"
+
   # ────────────────────────────────────────────────────────────────────────────
   # API Gateway — REST API (v1)
   # ────────────────────────────────────────────────────────────────────────────
@@ -1128,17 +1657,25 @@ Resources:
   # ── Resources (path tree) ────────────────────────────────────────────────────
   #
   #  /
-  #  └── funds
-  #      ├── GET      → FundProcessingStatusLambda
-  #      ├── POST     → CreateFundUploadLambda
-  #      ├── register
-  #      │   └── POST → ExternalFundCreateLambda   (external party with own fundId)
-  #      └── {fundId}
-  #          ├── GET       → FundGetByIdLambda
-  #          ├── /init     POST → FundInitUploadLambda
-  #          ├── /upload   POST → FundDocumentUploadLambda
-  #          ├── /complete POST → FundUploadCompleteLambda
-  #          └── /extract  POST → ICMemoExtractionLambda
+  #  ├── funds
+  #  │   ├── GET      → FundProcessingStatusLambda
+  #  │   ├── POST     → CreateFundUploadLambda          (DEPRECATED)
+  #  │   ├── upload
+  #  │   │   └── init
+  #  │   │       └── POST → InitDocumentUploadLambda    (ICMemo + IMA unified)
+  #  │   ├── register
+  #  │   │   └── POST → ExternalFundCreateLambda        (DEPRECATED)
+  #  │   └── {fundId}
+  #  │       ├── GET       → FundGetByIdLambda
+  #  │       ├── /init     POST → FundInitUploadLambda
+  #  │       ├── /upload   POST → FundDocumentUploadLambda
+  #  │       ├── /complete POST → FundUploadCompleteLambda
+  #  │       └── /extract  POST → ICMemoExtractionLambda  (DEPRECATED)
+  #  └── formcheck
+  #      ├── init
+  #      │   └── POST → FormCheckInitLambda
+  #      └── {jobId}
+  #          └── GET  → FormCheckStatusLambda
 
   ResourceFunds:
     Type: AWS::ApiGateway::Resource
@@ -1188,6 +1725,22 @@ Resources:
       RestApiId: !Ref RestApi
       ParentId: !Ref ResourceFunds
       PathPart: register
+
+  # /funds/upload  (parent for the new unified upload-init route)
+  ResourceFundsUpload:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref ResourceFunds
+      PathPart: upload
+
+  # /funds/upload/init
+  ResourceFundsUploadInit:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref ResourceFundsUpload
+      PathPart: init
 
   # ── Methods: /funds ──────────────────────────────────────────────────────────
 
@@ -1507,6 +2060,157 @@ Resources:
             method.response.header.Access-Control-Allow-Methods: false
             method.response.header.Access-Control-Allow-Origin: false
 
+  # ── Methods: /funds/upload/init ──────────────────────────────────────────────
+
+  # POST /funds/upload/init  → InitDocumentUploadLambda
+  MethodFundsUploadInitPOST:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ResourceFundsUploadInit
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Fn}/invocations"
+          - Fn: !GetAtt InitDocumentUploadLambda.Arn
+
+  # OPTIONS /funds/upload/init  → CORS preflight mock
+  MethodFundsUploadInitOPTIONS:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ResourceFundsUploadInit
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ""
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: false
+            method.response.header.Access-Control-Allow-Methods: false
+            method.response.header.Access-Control-Allow-Origin: false
+
+  # ── FormCheck API Gateway Resources & Methods ────────────────────────────────
+
+  ResourceFormCheck:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId:  !GetAtt RestApi.RootResourceId
+      PathPart:  formcheck
+
+  ResourceFormCheckInit:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId:  !Ref ResourceFormCheck
+      PathPart:  init
+
+  ResourceFormCheckJobId:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId:  !Ref ResourceFormCheck
+      PathPart:  "{jobId}"
+
+  # POST /formcheck/init  → FormCheckInitLambda
+  MethodFormCheckInitPOST:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:         !Ref RestApi
+      ResourceId:        !Ref ResourceFormCheckInit
+      HttpMethod:        POST
+      AuthorizationType: NONE
+      Integration:
+        Type:                  AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Fn}/invocations"
+          - Fn: !GetAtt FormCheckInitLambda.Arn
+
+  # OPTIONS /formcheck/init  → CORS preflight mock
+  MethodFormCheckInitOPTIONS:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:         !Ref RestApi
+      ResourceId:        !Ref ResourceFormCheckInit
+      HttpMethod:        OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ""
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: false
+            method.response.header.Access-Control-Allow-Methods: false
+            method.response.header.Access-Control-Allow-Origin: false
+
+  # GET /formcheck/{jobId}  → FormCheckStatusLambda
+  MethodFormCheckJobIdGET:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:         !Ref RestApi
+      ResourceId:        !Ref ResourceFormCheckJobId
+      HttpMethod:        GET
+      AuthorizationType: NONE
+      Integration:
+        Type:                  AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Fn}/invocations"
+          - Fn: !GetAtt FormCheckStatusLambda.Arn
+
+  # OPTIONS /formcheck/{jobId}  → CORS preflight mock
+  MethodFormCheckJobIdOPTIONS:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:         !Ref RestApi
+      ResourceId:        !Ref ResourceFormCheckJobId
+      HttpMethod:        OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ""
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: false
+            method.response.header.Access-Control-Allow-Methods: false
+            method.response.header.Access-Control-Allow-Origin: false
+
   # ── Deployment & Stage ───────────────────────────────────────────────────────
   # Deployment must depend on every Method so all routes are included.
 
@@ -1528,8 +2232,18 @@ Resources:
       - MethodFundExtractOPTIONS
       - MethodFundRegisterPOST
       - MethodFundRegisterOPTIONS
+      - MethodFundsUploadInitPOST
+      - MethodFundsUploadInitOPTIONS
+      - MethodFormCheckInitPOST
+      - MethodFormCheckInitOPTIONS
+      - MethodFormCheckJobIdGET
+      - MethodFormCheckJobIdOPTIONS
     Properties:
       RestApiId: !Ref RestApi
+      # Changing Description forces CloudFormation to create a NEW deployment,
+      # which is required for newly added routes to appear in the stage.
+      # Bump this value whenever new API methods are added.
+      Description: "formcheck-routes-v1"
 
   RestApiStage:
     Type: AWS::ApiGateway::Stage
@@ -1545,6 +2259,15 @@ Resources:
 
   # ── Lambda permissions for API Gateway ───────────────────────────────────────
 
+  PermissionInitDocumentUpload:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref InitDocumentUploadLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*"
+
+  # DEPRECATED — superseded by PermissionInitDocumentUpload
   PermissionCreateFundUpload:
     Type: AWS::Lambda::Permission
     Properties:
@@ -1605,6 +2328,22 @@ Resources:
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !Ref ExternalFundCreateLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*"
+
+  PermissionFormCheckInit:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref FormCheckInitLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*"
+
+  PermissionFormCheckStatus:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref FormCheckStatusLambda
       Action: lambda:InvokeFunction
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*"
@@ -1743,3 +2482,33 @@ Outputs:
     Value: !GetAtt S3UploadTriggerLambda.Arn
     Export:
       Name: !Sub "${AWS::StackName}-s3-upload-trigger-arn"
+
+  FormCheckBucketName:
+    Description: S3 bucket for FormCheck PDF uploads (independent from the main upload bucket).
+    Value: !Ref FormCheckBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-formcheck-bucket"
+
+  FormCheckTableName:
+    Description: DynamoDB table for FormCheck job records (PK = jobId = FCHK#<uuid>).
+    Value: !Ref FormCheckTable
+    Export:
+      Name: !Sub "${AWS::StackName}-formcheck-table"
+
+  FormCheckTextractTopicArn:
+    Description: SNS topic ARN for Textract to publish FormCheck completion notifications.
+    Value: !Ref FormCheckTextractTopic
+    Export:
+      Name: !Sub "${AWS::StackName}-formcheck-textract-topic-arn"
+
+  FormCheckResultsQueueUrl:
+    Description: SQS URL subscribed to FormCheckTextractTopic, triggers FormCheckResultsWorkerLambda.
+    Value: !Ref FormCheckResultsQueue
+    Export:
+      Name: !Sub "${AWS::StackName}-formcheck-results-queue-url"
+
+  FormCheckStateMachineArn:
+    Description: ARN of the FormCheck Step Functions state machine (Map-based parallel chunk analyzer).
+    Value: !GetAtt FormCheckStateMachine.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-formcheck-sfn-arn"

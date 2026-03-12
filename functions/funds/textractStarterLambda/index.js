@@ -43,10 +43,11 @@ export const handler = async (event, context) => {
       throw new Error("Invalid SQS payload");
     }
 
-    // JobTag: Textract allows only [a-zA-Z0-9_.\-:] — strip "INT#"/"EXT#" prefix and use ":" separator
-    // Format: "<uuid>:<documentType>"  e.g. "abc-123:fundstructure" = 55 chars max (within 64)
-    const uuid   = fundId.replace(/^(INT|EXT)#/, "");
-    const jobTag = `${uuid}:${documentType}`.slice(0, 64);
+    // JobTag: Textract allows only [a-zA-Z0-9_.\-:] — encode prefix as I/E, strip "#"
+    // Format: "<P>:<uuid>:<documentType>"  e.g. "I:abc-123:icmemo"  I=INT# E=EXT#
+    const prefixChar = fundId.startsWith("INT#") ? "I" : "E";
+    const uuid       = fundId.replace(/^(INT|EXT)#/, "");
+    const jobTag     = `${prefixChar}:${uuid}:${documentType}`.slice(0, 64);
 
     log("INFO", "Starting async Textract job", { requestId, fundId, documentType, bucket, key, jobTag });
 
