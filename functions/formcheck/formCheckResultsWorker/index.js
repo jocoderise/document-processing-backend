@@ -303,7 +303,7 @@ async function processOneMessage({ message, requestId }) {
         ":u":         new Date().toISOString(),
         ":c":         new Date().toISOString(),
         ":r":         JSON.stringify({
-          valid: true, incompleteSections: [], completeSections: [],
+          valid: true, incompleteSections: [], uncertainItems: [],
           summary: "No form fields detected"
         })
       }
