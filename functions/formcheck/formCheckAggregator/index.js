@@ -18,6 +18,24 @@ function log(level, message, meta = {}) {
   console.log(JSON.stringify({ level, message, timestamp: new Date().toISOString(), ...meta }));
 }
 
+/* ---------------- HELPERS ---------------- */
+
+/**
+ * Normalize a section title for semantic deduplication.
+ * "Name of Subscriber", "Subscriber Name", "Subscriber's Name" all collapse to the same key.
+ */
+function normalizeTitle(title) {
+  return (title || "")
+    .toLowerCase()
+    .replace(/[''`]/g, "")           // remove apostrophes
+    .replace(/[^a-z0-9\s]/g, " ")   // strip punctuation
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .sort()                          // sort words so order doesn't matter
+    .join(" ");
+}
+
 /* ---------------- HANDLER ---------------- */
 
 export const handler = async (event, context) => {
@@ -41,14 +59,18 @@ export const handler = async (event, context) => {
 
   for (const chunkResult of (chunkResults || [])) {
     for (const section of (chunkResult.incompleteSections || [])) {
-      if (!seenIncomplete.has(section.title)) {
-        seenIncomplete.add(section.title);
+      // Fix 5: normalise title so "Subscriber Name" / "Name of Subscriber" / "Subscriber's Name"
+      // all collapse to the same dedup key, preventing near-duplicate entries across chunks.
+      const key = `${normalizeTitle(section.title)}||${section.page ?? ""}`;
+      if (!seenIncomplete.has(key)) {
+        seenIncomplete.add(key);
         allIncompleteSections.push(section);
       }
     }
     for (const item of (chunkResult.uncertainItems || [])) {
-      if (!seenUncertain.has(item.title)) {
-        seenUncertain.add(item.title);
+      const key = `${normalizeTitle(item.title)}||${item.page ?? ""}`;
+      if (!seenUncertain.has(key)) {
+        seenUncertain.add(key);
         allUncertainItems.push(item);
       }
     }
