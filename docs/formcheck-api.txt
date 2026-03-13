@@ -186,6 +186,18 @@ Processed in ~50 seconds. 10 incomplete sections found.
 }
 
 
+OPTIONAL - CHECK STATUS VIA API
+--------------------------------
+If you prefer HTTP over querying DynamoDB directly, there is a status endpoint:
+
+GET https://qtr7viace9.execute-api.us-east-1.amazonaws.com/dev/formcheck/{jobId}
+
+eg GET https://qtr7viace9.execute-api.us-east-1.amazonaws.com/dev/formcheck/FCHK-b74c2d06-c5e2-4ff7-8a07-0c77198e3c1f
+
+Returns the same data as the DynamoDB record. When status is SUCCEEDED the full
+result object is included in the response (already parsed, not a string).
+
+
 NOTES
 -----
 - Processing takes ~30-120 seconds after upload depending on PDF size

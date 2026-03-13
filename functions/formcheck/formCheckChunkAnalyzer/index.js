@@ -104,13 +104,13 @@ Additional output rules:
 /* ---------------- BEDROCK CALL ---------------- */
 
 async function analyzeChunkWithBedrock(chunkFields, startPage, endPage, totalFields, requestId) {
-  const userPrompt = `Analyzing pages ${startPage}–${endPage} of a ${totalFields}-field form.\nThe following ${chunkFields.length} fields on these pages are empty or unselected — identify ONLY the incomplete sections present in this page range:\n\n${JSON.stringify(chunkFields, null, 2)}\n\nReturn the JSON analysis.`;
+  const userPrompt = `Analyzing pages ${startPage}–${endPage} of a ${totalFields}-field form.\nThe following ${chunkFields.length} fields on these pages are empty or unselected — identify ONLY the incomplete sections present in this page range:\n\n${JSON.stringify(chunkFields, null, 2)}\n\nIMPORTANT: Your entire response must be a single valid JSON object starting with { — no explanation, no markdown, no preamble before or after the JSON.`;
 
   const resp = await bedrock.send(new ConverseCommand({
     modelId: MODEL_ID,
     system:  [{ text: SYSTEM_PROMPT }],
     messages: [{ role: "user", content: [{ text: userPrompt }] }],
-    inferenceConfig: { maxTokens: 5120, temperature: 0 }
+    inferenceConfig: { maxTokens: 16384, temperature: 0 }
   }));
 
   const rawText = (resp.output?.message?.content?.[0]?.text || "").trim();
