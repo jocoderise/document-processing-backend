@@ -251,9 +251,9 @@
             }
           }
 
-          @if (fcResult.uncertainItems?.length > 0) {
+          @if ((fcResult.uncertainItems?.length ?? 0) > 0) {
             <div class="fc-section-header" style="margin-top:16px">
-              <span class="fc-badge fc-badge-warn" style="background:#f59e0b">{{ fcResult.uncertainItems.length }} Needs Review</span>
+              <span class="fc-badge fc-badge-warn" style="background:#f59e0b">{{ fcResult.uncertainItems?.length }} Needs Review</span>
             </div>
             @for (item of fcResult.uncertainItems; track $index) {
               <div class="fc-section" style="border-left-color:#f59e0b">
